@@ -58,7 +58,9 @@ func main() {
 	case "sync":
 		// 获取进程锁，防止多个实例同时操作同一目标盘
 		filesyncDir := filepath.Join(cfg.TargetRoot, config.FilesyncDir)
-		os.MkdirAll(filesyncDir, 0755)
+		if err := os.MkdirAll(filesyncDir, 0755); err != nil {
+			fatal("创建元数据目录失败: %v", err)
+		}
 		lk, err := lock.Acquire(filesyncDir)
 		if err != nil {
 			fatal("%v", err)
@@ -160,7 +162,9 @@ func main() {
 	case "reindex":
 		filesyncDir := filepath.Join(cfg.TargetRoot, config.FilesyncDir)
 		// 获取进程锁：reindex 会重写整个索引
-		os.MkdirAll(filesyncDir, 0755)
+		if err := os.MkdirAll(filesyncDir, 0755); err != nil {
+			fatal("创建元数据目录失败: %v", err)
+		}
 		lk, err := lock.Acquire(filesyncDir)
 		if err != nil {
 			fatal("%v", err)
@@ -181,7 +185,9 @@ func main() {
 	case "prune":
 		filesyncDir := filepath.Join(cfg.TargetRoot, config.FilesyncDir)
 		// 获取进程锁：prune 会删除 object 文件并修改索引
-		os.MkdirAll(filesyncDir, 0755)
+		if err := os.MkdirAll(filesyncDir, 0755); err != nil {
+			fatal("创建元数据目录失败: %v", err)
+		}
 		lk, err := lock.Acquire(filesyncDir)
 		if err != nil {
 			fatal("%v", err)

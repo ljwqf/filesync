@@ -139,7 +139,9 @@ func (c *fileCAS) RemoveTempObject(objectKey string) error {
 	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
 	// exFAT 临时 object，需先解除只读再删
-	os.Chmod(objPath, 0644)
+	if err := os.Chmod(objPath, 0644); err != nil {
+		return fmt.Errorf("chmod temp object: %w", err)
+	}
 	if err := os.Remove(objPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove temp object: %w", err)
 	}
@@ -148,7 +150,9 @@ func (c *fileCAS) RemoveTempObject(objectKey string) error {
 
 func (c *fileCAS) DeleteObject(objectKey string) error {
 	objPath := paths.Long(c.ObjectPath(objectKey))
-	os.Chmod(objPath, 0644)
+	if err := os.Chmod(objPath, 0644); err != nil {
+		return fmt.Errorf("chmod object: %w", err)
+	}
 	if err := os.Remove(objPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete object %s: %w", objPath, err)
 	}
@@ -215,19 +219,19 @@ func DetectMode(path string) StorageMode {
 	return ModeHardlink
 }
 
-// makeUniqueTestDir 在 path 下创建带随机后缀的临时目录，返回目录路径、清理函数与成功标志。
-// 使用随机后缀避免并发调用 DetectMode 时共享同一目录导致竞态。
+// makeUniqueTestDir 在系统临时目录下创建带随机后缀的测试目录，返回目录路径、清理函数与成功标志。
+// 使用系统临时目录避免在目标路径（可能是只读介质）创建文件，同时避免并发调用间的竞态。
 func makeUniqueTestDir(path string) (dir string, cleanup func(), ok bool) {
 	var suffix [4]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		// rand 失败时退回使用固定目录（仍可用，只是并发不安全）
-		d := filepath.Join(path, ".modetest")
+		d := filepath.Join(os.TempDir(), ".filesync-modetest")
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return "", func() {}, false
 		}
 		return d, func() { os.RemoveAll(d) }, true
 	}
-	dir = filepath.Join(path, ".modetest-"+hex.EncodeToString(suffix[:]))
+	dir = filepath.Join(os.TempDir(), ".filesync-modetest-"+hex.EncodeToString(suffix[:]))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", func() {}, false
 	}
@@ -264,6 +268,6 @@ func prepareOverwrite(dest string) {
 		return
 	}
 	if fi.Mode()&0200 == 0 { // 只读
-		os.Chmod(dest, fi.Mode()|0200)
+		os.Chmod(dest, fi.Mode()|0200) // 错误不处理：后续 PlaceFile 会报明确错误
 	}
 }

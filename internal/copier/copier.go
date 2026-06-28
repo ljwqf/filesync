@@ -204,7 +204,7 @@ func (c *Copier) processTask(t Task, verify bool) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("stat src: %w", err)
 	}
-	if fi.Size() != t.Size || !mtimeClose(fi.ModTime(), t.Mtime) {
+	if fi.Size() != t.Size || !paths.MtimeClose(fi.ModTime(), t.Mtime) {
 		newKey, err := c.hasher.HashFile(srcLong)
 		if err != nil {
 			return 0, fmt.Errorf("rehash: %w", err)
@@ -248,7 +248,10 @@ func (c *Copier) processTask(t Task, verify bool) (int64, error) {
 
 	// 5. 保留源 mtime
 	destLong := paths.Long(t.DestAbs)
-	os.Chtimes(destLong, time.Now(), t.Mtime)
+	if err := os.Chtimes(destLong, time.Now(), t.Mtime); err != nil {
+		// mtime 未保留不影响正确性，仅影响下次增量判定（会重新拷贝）
+		fmt.Fprintf(os.Stderr, "警告: 保留 mtime 失败 %s: %v\n", t.RelPath, err)
+	}
 
 	// 6. verify（设计 §7：小文件强制校验；大文件按 verify 开关）
 	//    小文件校验开销极小，强制执行确保完整性；大文件重算哈希 doubles IO，
@@ -310,7 +313,9 @@ func (c *Copier) handleConflict(t Task, objectKey string) error {
 	}
 	conflictPath := filepath.Join(conflictDir, filepath.Base(t.DestAbs))
 	// 冲突文件可能是只读，先解除
-	os.Chmod(destLong, destInfo.Mode()|0200)
+	if err := os.Chmod(destLong, destInfo.Mode()|0200); err != nil {
+		return fmt.Errorf("chmod conflict file: %w", err)
+	}
 	if err := os.Rename(destLong, paths.Long(conflictPath)); err != nil {
 		return fmt.Errorf("move conflict file to %s: %w", conflictPath, err)
 	}
@@ -320,15 +325,6 @@ func (c *Copier) handleConflict(t Task, objectKey string) error {
 // nowTimestamp 返回用于冲突目录名的时间戳（秒级，文件系统友好）。
 func nowTimestamp() string {
 	return time.Now().Format("20060102-150405")
-}
-
-// mtimeClose 比较 mtime，容差 2 秒（FAT/exFAT 精度）。
-func mtimeClose(a, b time.Time) bool {
-	d := a.Sub(b)
-	if d < 0 {
-		d = -d
-	}
-	return d <= 2*time.Second
 }
 
 // Windows 共享/锁定违规错误码。

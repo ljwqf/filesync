@@ -218,7 +218,9 @@ func (d *Deduper) hardlinkGroup(group *DupGroup) ([]string, error) {
 
 		// 解除只读（若只读则无法 rename）
 		if fi.Mode()&0200 == 0 {
-			os.Chmod(fileLong, fi.Mode()|0200)
+			if err := os.Chmod(fileLong, fi.Mode()|0200); err != nil {
+				fmt.Fprintf(os.Stderr, "警告: 解除只读失败 %s: %v\n", filePath, err)
+			}
 		}
 
 		// 安全去重：先 rename 到临时路径，再创建硬链接，失败则回滚
@@ -230,19 +232,25 @@ func (d *Deduper) hardlinkGroup(group *DupGroup) ([]string, error) {
 		// 创建指向代表文件的硬链接
 		if err := d.linkFn(repLong, fileLong); err != nil {
 			// 链接失败：将临时文件 rename 回原路径，恢复原文件
-			os.Rename(tmpPath, fileLong)
+			if rerr := os.Rename(tmpPath, fileLong); rerr != nil {
+				fmt.Fprintf(os.Stderr, "警告: 回滚失败，原始文件已移至 %s，请手动恢复: %v\n", tmpPath, rerr)
+			}
 			continue
 		}
 
 		// 链接成功：删除临时文件（原文件的备份）
-		os.Remove(tmpPath)
+		if err := os.Remove(tmpPath); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 删除临时文件失败 %s: %v\n", tmpPath, err)
+		}
 		deduped = append(deduped, filePath)
 	}
 
 	// 组内去重全部完成：还原代表文件 mtime（硬链接共享 inode，此操作统一设置整组 mtime）。
 	// 放在循环外、最后执行，避免被组内后续操作覆盖。
 	if len(deduped) > 0 {
-		os.Chtimes(repLong, time.Now(), repMtime)
+		if err := os.Chtimes(repLong, time.Now(), repMtime); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 还原 mtime 失败 %s: %v\n", group.Representative, err)
+		}
 	}
 
 	return deduped, nil

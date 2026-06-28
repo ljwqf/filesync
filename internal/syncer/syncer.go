@@ -16,6 +16,7 @@ import (
 	"github.com/ljw/filesync/internal/index"
 	"github.com/ljw/filesync/internal/paths"
 	"github.com/ljw/filesync/internal/scanner"
+
 )
 
 // nowFn 可被测试覆盖的时间函数。
@@ -92,7 +93,10 @@ func (s *Syncer) run(ctx context.Context, dryRun bool) (Report, error) {
 			for _, d := range dirs {
 				rel, _ := filepath.Rel(src.Src, d)
 				destDir := filepath.Join(s.cfg.TargetRoot, src.Dest, rel)
-				os.MkdirAll(paths.Long(destDir), 0755)
+				if err := os.MkdirAll(paths.Long(destDir), 0755); err != nil {
+					// 目录创建失败不中断整体，后续拷贝时会报明确错误
+					fmt.Fprintf(os.Stderr, "警告: 创建目录 %s 失败: %v\n", destDir, err)
+				}
 			}
 		}
 
@@ -106,12 +110,12 @@ func (s *Syncer) run(ctx context.Context, dryRun bool) (Report, error) {
 			}
 			// 查索引：断点续传判定
 			old, ok, _ := idx.GetFile(relPath)
-			if ok && old.Size == fi.Size && old.ObjectKey == key && mtimeClose(old.Mtime, fi.Mtime) {
+			if ok && old.Size == fi.Size && old.ObjectKey == key && paths.MtimeClose(old.Mtime, fi.Mtime) {
 				skipped++
 				continue
 			}
 			// (size, objectKey) 匹配但 mtime 不同 → 仅更新索引 mtime，跳过拷贝
-			if ok && old.Size == fi.Size && old.ObjectKey == key && !mtimeClose(old.Mtime, fi.Mtime) {
+			if ok && old.Size == fi.Size && old.ObjectKey == key && !paths.MtimeClose(old.Mtime, fi.Mtime) {
 				if !dryRun {
 					idx.PutFile(relPath, index.FileRecord{
 						Size: fi.Size, Mtime: fi.Mtime, ObjectKey: key, SyncedAt: nowFn(),
@@ -205,13 +209,4 @@ func estimateSpaceNeeded(c cas.CAS, tasks []copier.Task, workers int) int64 {
 		}
 	}
 	return max * int64(workers)
-}
-
-// mtimeClose 比较 mtime，容差 2 秒（FAT/exFAT 精度）。
-func mtimeClose(a, b time.Time) bool {
-	d := a.Sub(b)
-	if d < 0 {
-		d = -d
-	}
-	return d <= 2*time.Second
 }
