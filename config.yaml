@@ -1,0 +1,19 @@
+# file_sync 配置示例
+# 放在工具同级目录，或 --config 指定路径
+
+target_root: "E:\\PSSD_sync"      # 目标盘根（绝对路径）
+workers: 8                          # 并发拷贝数（默认 8）
+verify: true                        # 拷贝后校验哈希（默认 true）
+
+sources:
+  - src: "D:\\Project\\Go_project"  # 源目录（绝对路径）
+    dest: "Project/Go_project"      # 目标盘内相对路径（正斜杠）
+  - src: "D:\\Documents\\Work"
+    dest: "Documents/Work"
+
+exclude:                            # 排除规则（** 递归 glob，相对源根，大小写不敏感）
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/*.tmp"
+  - "**/*.log"
+  - "**/Thumbs.db"

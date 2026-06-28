@@ -1,0 +1,21 @@
+# 二进制
+filesync
+filesync.exe
+*.exe
+
+# 测试产物
+*.test
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+nul
+
+# Audit results (generated, not source)
+.audit-results/
