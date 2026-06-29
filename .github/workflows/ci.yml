@@ -24,6 +24,13 @@ jobs:
         with:
           go-version: '1.23'
 
+      - name: Debug Go environment
+        run: |
+          go version
+          go env GOMOD GOWORK GOPATH
+          ls -la go.mod
+          head -3 go.mod
+
       - name: Download modules
         run: go mod download
 
