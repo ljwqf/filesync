@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/windows"
 )
 
 const (
@@ -115,19 +113,4 @@ func readLock(path string) (pid int, startTime time.Time, err error) {
 		startTime, _ = time.Parse(time.RFC3339, strings.TrimSpace(lines[1]))
 	}
 	return pid, startTime, nil
-}
-
-// isProcessAlive 检查指定 PID 的进程是否仍在运行。
-// 在 Windows 上使用 OpenProcess 检测进程存在性。
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	// SYNCHRONIZE 权限足以检测进程是否存在
-	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
-	if err != nil {
-		return false // 进程不存在或无权限访问
-	}
-	windows.CloseHandle(h)
-	return true
 }
