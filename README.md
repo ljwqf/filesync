@@ -214,7 +214,7 @@ go test -cover ./...     # 覆盖率
 
 ### CI/CD
 
-每次 push / PR 自动在 **Ubuntu + Windows** 上跑 `go vet` + `go test -race` + `go build`。
+每次 push / PR 自动在 **Ubuntu + Windows** 上跑 `go test -race` + `go build`。
 
 打 `v*` 标签自动触发 Release，交叉编译 4 个平台并附带 SHA256 checksums：
 
@@ -284,3 +284,19 @@ go test -cover ./...     # 覆盖率
 | 空文件哈希 | 实测值 `99aa06d3...`，非占位符 |
 | RefCount=0 清理 | `prune` 命令显式清理，未实现异步清理通道 |
 | errgroup | 保留 WaitGroup，与错误隔离语义冲突 |
+
+
+### 2026-06-29 跨平台重构 + CI/CD 配置
+
+完成 Windows-only 代码的跨平台拆分，配置 GitHub Actions CI/CD：
+
+- **跨平台重构**：4 个包的 Windows API 用 build-tag 拆分 + cgo 替代 `golang.org/x/sys`：
+  - `lock`：`lock_windows.go`（cgo OpenProcess）/ `lock_unix.go`（syscall.Kill）
+  - `disk`：`disk_windows.go`（cgo GetDiskFreeSpaceExW）/ `disk_unix.go`（syscall.Statfs）
+  - `copier`：`locked_windows.go`（errno 32/33）/ `locked_unix.go`（EBUSY/EACCES/EAGAIN）
+  - `paths`：`paths_windows.go`/`paths_unix.go`（Long/IsLong）；`sanitize_windows.go`/`sanitize_unix.go`
+- **模块路径**：`github.com/ljw/filesync` → `github.com/ljwqf/filesync`
+- **CI/CD**：`.github/workflows/` 下 CI（Ubuntu + Windows 矩阵）+ Release（4 平台交叉编译）
+- **测试跨平台**：config/copier/paths 测试加 `runtime.GOOS` 平台判断
+- **YAML 转义修复**：`yaml.v3` 双引号内 `\P` 被解释为 U+2029，含反斜杠路径改用单引号包裹
+- **sanitize 行为**：Unix 只 strip `/` 和 ` `，反斜杠和 `..` 为合法 Unix 文件名字符
