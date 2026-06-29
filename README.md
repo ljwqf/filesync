@@ -210,7 +210,20 @@ go test -race ./...      # 含竞态检测
 go test -cover ./...     # 覆盖率
 ```
 
-当前共 **89 个测试**,覆盖 15 个包,`go vet ./...` 无问题。
+当前共 **95 个测试**,覆盖 16 个包,`go vet ./...` 无问题。
+
+### CI/CD
+
+每次 push / PR 自动在 **Ubuntu + Windows** 上跑 `go vet` + `go test -race` + `go build`。
+
+打 `v*` 标签自动触发 Release，交叉编译 4 个平台并附带 SHA256 checksums：
+
+| 平台 | 产物 |
+|------|------|
+| Windows amd64 | `filesync-windows-amd64.exe` |
+| Linux amd64 | `filesync-linux-amd64` |
+| macOS amd64 | `filesync-darwin-amd64` |
+| macOS arm64 | `filesync-darwin-arm64` |
 
 ---
 
