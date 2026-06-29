@@ -8,14 +8,14 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/config"
-	"github.com/ljw/filesync/internal/copier"
-	"github.com/ljw/filesync/internal/disk"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
-	"github.com/ljw/filesync/internal/paths"
-	"github.com/ljw/filesync/internal/scanner"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/config"
+	"github.com/ljwqf/filesync/internal/copier"
+	"github.com/ljwqf/filesync/internal/disk"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/paths"
+	"github.com/ljwqf/filesync/internal/scanner"
 
 )
 

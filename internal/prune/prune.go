@@ -6,8 +6,8 @@ package prune
 import (
 	"fmt"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/index"
 )
 
 // Stats 是 prune 统计。

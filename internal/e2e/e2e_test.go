@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/config"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
-	"github.com/ljw/filesync/internal/prune"
-	"github.com/ljw/filesync/internal/reindex"
-	"github.com/ljw/filesync/internal/syncer"
-	"github.com/ljw/filesync/internal/verify"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/config"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/prune"
+	"github.com/ljwqf/filesync/internal/reindex"
+	"github.com/ljwqf/filesync/internal/syncer"
+	"github.com/ljwqf/filesync/internal/verify"
 )
 
 // TestE2E_FullLifecycle 验证完整生命周期：

@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
 )
 
 func TestVerify_AllConsistent(t *testing.T) {

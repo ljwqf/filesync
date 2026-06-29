@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/hasher"
 )
 
 func newDeduper(t *testing.T) *Deduper {

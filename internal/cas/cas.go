@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ljw/filesync/internal/paths"
+	"github.com/ljwqf/filesync/internal/paths"
 )
 
 // StorageMode 表示目标文件系统支持的去重方式。

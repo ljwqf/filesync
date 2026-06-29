@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/config"
-	"github.com/ljw/filesync/internal/copier"
-	"github.com/ljw/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/config"
+	"github.com/ljwqf/filesync/internal/copier"
+	"github.com/ljwqf/filesync/internal/index"
 )
 
 func setupSyncer(t *testing.T) (s *Syncer, targetRoot, srcDir string) {

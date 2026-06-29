@@ -1,7 +1,11 @@
 # file_sync 配置示例
+# 支持 Windows / Linux / macOS
 # 放在工具同级目录，或 --config 指定路径
 
 target_root: "E:\\PSSD_sync"      # 目标盘根（绝对路径）
+# Linux 示例: target_root: "/mnt/backup"
+# macOS 示例: target_root: "/Volumes/MySSD/backup"
+
 workers: 8                          # 并发拷贝数（默认 8）
 verify: true                        # 拷贝后校验哈希（默认 true）
 
@@ -10,6 +14,12 @@ sources:
     dest: "Project/Go_project"      # 目标盘内相对路径（正斜杠）
   - src: "D:\\Documents\\Work"
     dest: "Documents/Work"
+  # Linux 示例:
+  # - src: "/home/user/projects"
+  #   dest: "projects"
+  # macOS 示例:
+  # - src: "/Users/user/Projects"
+  #   dest: "Projects"
 
 exclude:                            # 排除规则（** 递归 glob，相对源根，大小写不敏感）
   - "**/.git/**"

@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
-	"github.com/ljw/filesync/internal/paths"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/paths"
 )
 
 // Stats 是 reindex 统计。

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/index"
 )
 
 func setup(t *testing.T) (p *Pruner, targetRoot string, c cas.CAS, idx index.Index) {

@@ -5,18 +5,16 @@ package copier
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
-	"github.com/ljw/filesync/internal/paths"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/paths"
 )
 
 // Task 是一个待执行的同步任务。
@@ -325,19 +323,4 @@ func (c *Copier) handleConflict(t Task, objectKey string) error {
 // nowTimestamp 返回用于冲突目录名的时间戳（秒级，文件系统友好）。
 func nowTimestamp() string {
 	return time.Now().Format("20060102-150405")
-}
-
-// Windows 共享/锁定违规错误码。
-const (
-	errSharingViolation = 32 // ERROR_SHARING_VIOLATION
-	errLockViolation    = 33 // ERROR_LOCK_VIOLATION
-)
-
-// isLockedError 判断错误是否为文件被占用/锁定（设计 §10：跳过并记录）。
-func isLockedError(err error) bool {
-	var sysErr syscall.Errno
-	if errors.As(err, &sysErr) {
-		return sysErr == errSharingViolation || sysErr == errLockViolation
-	}
-	return false
 }

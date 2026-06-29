@@ -10,17 +10,17 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/config"
-	"github.com/ljw/filesync/internal/dedup"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
-	"github.com/ljw/filesync/internal/lock"
-	"github.com/ljw/filesync/internal/prune"
-	"github.com/ljw/filesync/internal/reindex"
-	"github.com/ljw/filesync/internal/report"
-	"github.com/ljw/filesync/internal/syncer"
-	"github.com/ljw/filesync/internal/verify"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/config"
+	"github.com/ljwqf/filesync/internal/dedup"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/lock"
+	"github.com/ljwqf/filesync/internal/prune"
+	"github.com/ljwqf/filesync/internal/reindex"
+	"github.com/ljwqf/filesync/internal/report"
+	"github.com/ljwqf/filesync/internal/syncer"
+	"github.com/ljwqf/filesync/internal/verify"
 )
 
 func main() {

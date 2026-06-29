@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ljw/filesync/internal/cas"
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/index"
-	"github.com/ljw/filesync/internal/scanner"
+	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/index"
+	"github.com/ljwqf/filesync/internal/scanner"
 )
 
 func setup(t *testing.T) (root, srcDir string, c cas.CAS, idx index.Index, h hasher.Hasher) {

@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ljw/filesync/internal/hasher"
-	"github.com/ljw/filesync/internal/paths"
-	"github.com/ljw/filesync/internal/scanner"
+	"github.com/ljwqf/filesync/internal/hasher"
+	"github.com/ljwqf/filesync/internal/paths"
+	"github.com/ljwqf/filesync/internal/scanner"
 )
 
 // DupGroup 描述一组内容完全相同的文件。
