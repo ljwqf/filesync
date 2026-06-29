@@ -19,3 +19,9 @@ nul
 
 # Audit results (generated, not source)
 .audit-results/
+
+# CI / Release artifacts
+dist/
+*.zip
+*.upx
+checksums.txt
