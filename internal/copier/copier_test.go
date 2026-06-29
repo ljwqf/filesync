@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"testing"
@@ -335,21 +336,24 @@ func TestCopier_ShouldVerify(t *testing.T) {
 
 // TestCopier_IsLockedError 验证锁定错误识别。
 func TestCopier_IsLockedError(t *testing.T) {
-	// ERROR_SHARING_VIOLATION = 32
-	if !isLockedError(syscall.Errno(32)) {
-		t.Error("Errno 32 (sharing violation) should be detected as locked")
+	// Windows 专用错误码，仅 Windows 上测试
+	if runtime.GOOS == "windows" {
+		// ERROR_SHARING_VIOLATION = 32
+		if !isLockedError(syscall.Errno(32)) {
+			t.Error("Errno 32 (sharing violation) should be detected as locked")
+		}
+		// ERROR_LOCK_VIOLATION = 33
+		if !isLockedError(syscall.Errno(33)) {
+			t.Error("Errno 33 (lock violation) should be detected as locked")
+		}
+		// 包装后的锁定错误也应识别
+		wrapped := fmt.Errorf("open file: %w", syscall.Errno(32))
+		if !isLockedError(wrapped) {
+			t.Error("wrapped sharing violation should be detected as locked")
+		}
 	}
-	// ERROR_LOCK_VIOLATION = 33
-	if !isLockedError(syscall.Errno(33)) {
-		t.Error("Errno 33 (lock violation) should be detected as locked")
-	}
-	// 普通错误不应识别为锁定
+	// 普通错误不应识别为锁定（所有平台）
 	if isLockedError(fmt.Errorf("some other error")) {
 		t.Error("generic error should not be detected as locked")
-	}
-	// 包装后的锁定错误也应识别
-	wrapped := fmt.Errorf("open file: %w", syscall.Errno(32))
-	if !isLockedError(wrapped) {
-		t.Error("wrapped sharing violation should be detected as locked")
 	}
 }
