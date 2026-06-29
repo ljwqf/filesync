@@ -25,31 +25,17 @@ jobs:
           go-version: '1.23'
           cache: false
 
-      - name: Diagnose
-        run: |
-          echo "=== go.mod ==="
-          cat go.mod
-          echo "=== go list -m ==="
-          go list -m
-          echo "=== go env GOMOD ==="
-          go env GOMOD
-          echo "=== go env GOPATH ==="
-          go env GOPATH
-          echo "=== go env GOWORK ==="
-          go env GOWORK
-          echo "=== ls internal/ ==="
-          ls internal/
-          echo "=== go list all ==="
-          go list -m all 2>&1 | head -20
-          echo "=== find old module in cache ==="
-          find $(go env GOMODCACHE)/cache/download -path "*ljw/filesync*" 2>/dev/null || echo "not found in download cache"
-          find $(go env GOMODCACHE)/github.com/ljw -maxdepth 3 2>/dev/null || echo "not found in mod cache"
-
-      - name: Download modules
+      - name: Download modules (fresh mod cache)
+        env:
+          GOMODCACHE: ${{ runner.temp }}/gomod
         run: go mod download
 
       - name: Test (race detector)
+        env:
+          GOMODCACHE: ${{ runner.temp }}/gomod
         run: go test -race -count=1 ./...
 
       - name: Build
+        env:
+          GOMODCACHE: ${{ runner.temp }}/gomod
         run: go build -o filesync.exe .
