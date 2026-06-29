@@ -276,9 +276,11 @@ go test -cover ./...     # 覆盖率
 
 ### 设计文档偏差记录
 
-以下实现决策与设计文档原文存在偏差(均已记录,设计文档为权威参考,实现为实际行为):
+实现与设计文档的差异已记录于设计文档 [§16 实现记录与设计偏差](docs/superpowers/specs/2026-06-23-file-sync-design.md#16-%E5%AE%9E%E7%8E%B0%E8%AE%B0%E5%BD%95%E4%B8%8E%E8%AE%BE%E8%AE%A1%E5%81%8F%E5%B7%AE)。主要偏差：
 
-1. **objectKey 物理文件名**:设计 §5 写 `objects/<bucket1>/<bucket2>/<objectKey>`(含 `h3:` 前缀)。实现中物理文件名为纯 hex(去掉 `h3:`),因 Windows 文件名不允许冒号。索引 key 仍为 `h3:<hex>`。
-2. **空文件哈希**:设计 §10 写"哈希固定为常量"未给具体值。实现中实测 xxh3 空内容 128 位哈希为 `99aa06d3014798d86001c324468d497f`,objectKey 为 `h3:99aa06d3014798d86001c324468d497f`。
-3. **RefCount=0 异步删除**:设计 §4.g/h/§10 描述"事务内仅置 0 标记 orphaned,事务提交后经异步清理通道再校验删除"。实现中简化为 prune 命令显式清理(RefCount=0 的 object 在 prune 时物理删除),未实现独立异步清理通道。功能等价,但需手动运行 prune。
-4. **errgroup**:设计 §12 选型理由提到 errgroup。实现中保留 WaitGroup,因 errgroup 的取消语义与设计 §7 的错误隔离需求冲突。
+| 偏差 | 实现决策 |
+|------|----------|
+| objectKey 物理文件名 | 纯 hex（去掉 `h3:` 前缀），因 Windows 不允许文件名含冒号 |
+| 空文件哈希 | 实测值 `99aa06d3...`，非占位符 |
+| RefCount=0 清理 | `prune` 命令显式清理，未实现异步清理通道 |
+| errgroup | 保留 WaitGroup，与错误隔离语义冲突 |

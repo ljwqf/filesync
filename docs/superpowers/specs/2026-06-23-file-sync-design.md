@@ -1,9 +1,9 @@
 # file_sync 文件同步工具设计文档
 
-- **状态**: 审查修订中
-- **日期**: 2026-06-23
-- **语言/运行时**: Go 1.23, Windows amd64
-- **目标平台**: Windows + 移动固态硬盘（当前 E: PSSD, exFAT, 1TB）
+- **状态**: 已实现
+- **日期**: 2026-06-23（设计）/ 2026-06-29（实现完成）
+- **语言/运行时**: Go 1.23, 跨平台 (Windows/Linux/macOS amd64+arm64)
+- **目标平台**: Windows + 移动固态硬盘（当前 E: PSSD, exFAT, 1TB）；同时支持 Linux、macOS
 
 ## 1. 背景与目标
 
@@ -32,7 +32,6 @@
 - 不做删除镜像（不删目标）
 - 不做实时监听（手动运行）
 - 不做加密/压缩（保持文件可直接浏览）
-- 不做跨平台（聚焦 Windows，路径处理针对 Windows）
 
 ## 2. 总体架构
 
@@ -176,8 +175,8 @@ type CAS interface {
    g. 在**同一个 bbolt 事务**中:
       - 若 destAbsPath 旧记录存在且 objectKey 不同 → 旧 object RefCount-- (仅更新索引计数, **不在事务内做物理删除**)
       - 新 object PutFile + PutObject(RefCount++)
-      - 若旧 object RefCount 归 0 → 记录到延迟删除队列 (objectKey, objectPath), 事务提交成功后由异步清理通道处理
-   h. 异步清理通道 (与 prune 共享逻辑): 事务提交成功后, 对延迟队列中的 objectKey 执行物理删除 (NTFS: 删 object 文件; exFAT: object 本就临时已删, 仅清索引记录)。删除失败记入孤立对象列表, 留待下次 prune 重试。**物理删除与索引事务解耦**: 即使物理删除失败, 索引已正确反映 RefCount=0, 不影响正确性, 仅产生可被 prune 清理的孤立文件
+      - 若旧 object RefCount 归 0 → 在索引中标记 Orphaned（不立即物理删除）
+   h. 物理删除由 `prune` 命令显式执行：用户运行 `filesync prune` 时，遍历 RefCount=0 的 object 物理删除 + 清索引记录。功能等价于异步通道，但需手动触发。**物理删除与索引事务解耦**: 索引已正确反映 RefCount=0，不影响正确性，仅产生可被 prune 清理的孤立文件
    i. (可选) verify: 对 destAbsPath 重算哈希比对 objectKey
 4. report 输出: 已跳过 / 已拷贝 / 去重节省 / 失败统计
 ```
@@ -191,12 +190,14 @@ type CAS interface {
 - 虽可在 EnsureObject 时验证内容，但增加了设计复杂度，收益有限
 - 全内容 xxh3 的计算速度已足够快（~10 GB/s），大文件瓶颈在 IO 而非哈希
 
-**objectKey 格式**：`h:<xxh3_hex>`（`h:` 前缀标识哈希算法，便于未来扩展）
+**objectKey 格式**：`h3:<xxh3_hex>`（`h3:` 前缀标识 xxh3 算法，便于未来扩展）
 
-**object 存储路径**：`objects/<bucket1>/<bucket2>/<objectKey>`
-- `bucket1` = objectKey 去掉 `h:` 前缀后的第 1-2 字符
+**object 存储路径**：`objects/<bucket1>/<bucket2>/<hex>`
+- 物理文件名使用纯 hex（去掉 `h3:` 前缀），因 Windows 文件名不允许冒号 `:`
+- `bucket1` = hex 第 1-2 字符
 - `bucket2` = 第 1-4 字符
-- 示例：`h:a1b2c3d4e5...` → bucket1=`a1`，bucket2=`a1b2` → 路径 `objects/a1/a1b2/h:a1b2c3d4e5...`
+- 示例：`h3:a1b2c3d4e5...` → bucket1=`a1`，bucket2=`a1b2` → 路径 `objects/a1/a1b2/a1b2c3d4e5...`
+- 索引 key 仍为 `h3:<hex>`，`cas.ObjectPath` / `cas.ListObjects` 负责双向转换
 
 两层分桶使桶数从 256 扩展到 65536，100 万 object 时每桶仅约 15 个文件，避免 exFAT 大目录性能退化。
 
@@ -233,7 +234,7 @@ type CAS interface {
 - **源文件中途修改处理**：worker 在拷贝前重新 stat 源文件，若 size/mtime 与 scanner 记录不符，重新计算哈希
 - **错误隔离**：单个文件失败不中断整体，记入失败列表，最终报告列出
 - **中断恢复**：捕获 `SIGINT`，优雅停止分发新任务，等待进行中的 worker 完成；已更新索引的文件下次跳过；exFAT 中途崩溃可能残留临时 object，下次运行或 prune 清理
-- **物理删除与索引事务解耦**：旧 object RefCount 归 0 时，物理删除不放入 bbolt 事务（避免"FS 删除成功但事务回滚"或"事务成功但 FS 删除失败"的不一致）。改为事务提交成功后由异步清理通道执行物理删除，删除失败仅产生可被 prune 清理的孤立文件，不影响索引正确性
+- **物理删除与索引事务解耦**：旧 object RefCount 归 0 时，事务内仅标记 Orphaned 不立即物理删除（避免"FS 删除成功但事务回滚"或"事务成功但 FS 删除失败"的不一致）。物理删除由 `prune` 命令显式执行，删除失败仅产生孤立文件，不影响索引正确性
 - **校验**：`--verify`（默认 true）拷贝后对目标文件重算哈希比对 objectKey；小文件强制校验
 - **索引写入串行化**：bbolt 单写者，所有 worker 的索引更新经单一 channel 串行写入，避免写竞争。每个消息携带同事务内 PutFile+PutObject 的完整信息
 
@@ -303,11 +304,12 @@ filesync prune [--config config.yaml] [--dry-run]
 | 目标目录已存在同名但内容不同文件 | 以源 objectKey 为准：若目标路径现有文件 objectKey 与源不符，将该文件移至 `.filesync/conflict/<时间戳>/<sanitized(源相对路径)>/<文件名>` 后再放置正确内容。`sanitized()` 将路径分隔符、`..`、`:`、非法字符替换为 `_`，并对超长路径截断+追加短哈希后缀（总长控制在 `\\?\` 的 32767 字符内），避免嵌套深度爆炸与非法路径。冲突移动记入报告 |
 | 硬链接误修改保护 | NTFS object 文件完成后设为只读 `0444`，防止用户编辑一个链接时污染所有同内容文件；exFAT object 临时存在无需此保护 |
 | 覆盖只读目标文件 | 放置/覆盖目标路径前，若目标已存在且为只读，先 chmod 可写再覆盖；exFAT 镜像副本默认可写，仅在用户手动设只读时触发 |
-| 文件更新时旧对象引用清理 | 同一 bbolt 事务中原子性地递减旧 object RefCount、递增新 object RefCount；**物理删除从事务分离**——RefCount 归 0 时仅记入延迟删除队列，事务提交成功后由异步清理通道（与 prune 共享逻辑）执行物理删除，失败留作孤立对象供下次 prune 重试 |
+| 文件更新时旧对象引用清理 | 同一 bbolt 事务中原子性地递减旧 object RefCount、递增新 object RefCount；**物理删除从事务分离**——RefCount 归 0 时在索引中标记 Orphaned，由 `prune` 命令显式物理删除，失败留作孤立文件供下次 prune 重试 |
 | 源文件在扫描与拷贝之间被修改 | copier 在拷贝前**重新 stat** 源文件，size/mtime 变化则重算哈希 |
 | object 存储桶平坦化 | 两层分桶 `objects/<2chars>/<4chars>/<key>`，100 万 object 时每桶仅 ~15 个文件，避免 exFAT 大目录性能退化 |
 | 哈希一致性校验 | `<algo>:<hex>` 格式使 index 可区分 hash 类型，便于未来扩展算法。当前算法前缀建议用 `h3:`（xxh3）而非泛化的 `h:`，避免未来新增算法时前缀歧义 |
-| 空文件 (size=0) | 哈希固定为常量，所有空文件复用同一 objectKey；NTFS 共享一个空 object，exFAT 各复制一份空文件（开销可忽略） |
+| 空文件 (size=0) | 哈希固定为常量 `99aa06d3014798d86001c324468d497f`（xxh3 空内容 128 位实测值），objectKey = `h3:99aa06d3014798d86001c324468d497f`；所有空文件复用同一 objectKey；NTFS 共享一个空 object，exFAT 各复制一份空文件（开销可忽略） |
+| 拷贝后校验 | 小文件（≤ 1 MiB）强制校验；大文件由 `--verify` 开关控制（默认 true）。小文件哈希快但损坏影响大，强制校验消除静默失败风险 |
 | 空目录 | scanner 记录空目录，syncer 在目标对应路径 mkdir 保留目录结构（不依赖文件存在性） |
 | exFAT 跨运行去重效果 | **仅单次运行内**有效：同内容文件共享一个临时 object，减少读源次数。跨运行时 object 已删，重复同步仍需读取源（与普通增量拷贝一致），额外开销仅为哈希重算。status/report 中对 exFAT 去重节省明确标注"单次运行内"，避免用户误期望跨运行跳过拷贝 |
 | Scanner 循环检测 | 使用 `filepath.WalkDir`（默认不跟随 symlink，本身安全）；额外记录 visited (device, inode) 集合，遇到已访问目录直接 `fs.SkipDir`，防御目录符号链接造成的循环。不跟随任何符号链接 |
@@ -321,7 +323,7 @@ filesync prune [--config config.yaml] [--dry-run]
 - **故障注入**：模拟中途崩溃（验证索引原子性）、文件锁定、空间不足
 - **场景测试**：
   - 源文件内容不变、仅 mtime 变化 → 仅更新索引，不拷贝
-  - 源文件路径不变、内容变化 → 正确替换目标，旧 object RefCount--，RefCount 归 0 走延迟异步删除
+  - 源文件路径不变、内容变化 → 正确替换目标，旧 object RefCount--，RefCount 归 0 标记 Orphaned
   - 源文件删除 → 目标文件保留，RefCount 不变
   - 同内容文件在多个源目录出现 → NTFS: objects 中仅存一份; exFAT: 临时 object 仅拷一次后删除, 镜像各一份
   - exFAT 同 objectKey 并发拷贝（路由到同 worker）→ object 不被提前删除, 无竞态损坏
@@ -341,8 +343,7 @@ filesync prune [--config config.yaml] [--dry-run]
 | `github.com/zeebo/xxh3` | xxh3 哈希 | 极快~10GB/s，纯 Go，无 cgo |
 | `go.etcd.io/bbolt` | 嵌入式 KV 索引 | 单文件 ACID，无需外部服务，成熟稳定 |
 | `gopkg.in/yaml.v3` | 配置解析 | 标准选择 |
-| `golang.org/x/sync/errgroup` | 并发编排 | errgroup 简化并发错误处理 |
-| `github.com/gobwas/glob` 或 `doublestar` | 递归 glob 匹配 | 标准库不支持 `**` 递归匹配 |
+| `github.com/bmatcuk/doublestar/v4` | 递归 glob 匹配 | 标准库不支持 `**` 递归匹配 |
 
 ## 13. 目录结构（预期）
 
@@ -407,7 +408,7 @@ file_sync/
 **已决项（记录备查）**：
 - exFAT 串行化方案 = **路由**（同 objectKey → 固定 worker）。曾考虑 per-key Mutex，因引入跨 worker 引用计数同步而放弃。
 - 临时 object 删除时机 = **该 key 最后任务完成时删除**（路由方案的必然结果）。
-- 旧 object 物理删除 = **事务外异步**（延迟删除队列 + prune 兜底）。
+- 旧 object 物理删除 = **prune 命令显式清理**（RefCount=0 标记 Orphaned，用户运行 `filesync prune` 时物理删除 + 清索引记录）。未实现独立异步清理通道，功能等价。
 
 ---
 
