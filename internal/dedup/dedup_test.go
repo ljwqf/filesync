@@ -596,24 +596,21 @@ func TestDedup_Incremental_FileChanged(t *testing.T) {
 	dir := t.TempDir()
 	content1 := []byte("original content 12345")
 	content2 := []byte("modified content 12345") // 同 size 不同内容
-	os.WriteFile(filepath.Join(dir, "a.txt"), content1, 0644)
-	os.WriteFile(filepath.Join(dir, "b.txt"), content1, 0644)
 
-	// 用确定性时间设置 mtime，确保两次运行有足够差距
-	pastTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	// 创建文件，显式设置 mtime 为 5 秒前（确保两次运行间有足够差距）
+	pastTime := time.Now().Add(-5 * time.Second)
+	os.WriteFile(filepath.Join(dir, "a.txt"), content1, 0644)
 	os.Chtimes(filepath.Join(dir, "a.txt"), pastTime, pastTime)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content1, 0644)
 	os.Chtimes(filepath.Join(dir, "b.txt"), pastTime, pastTime)
 
 	idx := newTestIndex(t)
 	d := newDeduper(t)
-
-	// 第一次运行
 	d.Run(dir, nil, false, idx)
 
-	// 修改 b.txt（保持同 size），设置新 mtime
+	// 修改 b.txt 并设置新 mtime（now），确保 >2s 容差
 	os.WriteFile(filepath.Join(dir, "b.txt"), content2, 0644)
-	futureTime := time.Date(2020, 1, 1, 0, 0, 10, 0, time.UTC) // 比 pastTime 晚 10 秒
-	os.Chtimes(filepath.Join(dir, "b.txt"), futureTime, futureTime)
+	os.Chtimes(filepath.Join(dir, "b.txt"), time.Now(), time.Now())
 
 	// 第二次运行：b.txt 内容变化，不应与 a.txt 重复
 	stats, err := d.Run(dir, nil, false, idx)
@@ -621,7 +618,7 @@ func TestDedup_Incremental_FileChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(stats.Groups) != 0 {
-		t.Errorf("Groups = %d, want 0 (b.txt changed)", len(stats.Groups))
+		t.Errorf("Groups = %d, want 0 (b.txt changed content)", len(stats.Groups))
 	}
 }
 
