@@ -599,15 +599,20 @@ func TestDedup_Incremental_FileChanged(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), content1, 0644)
 	os.WriteFile(filepath.Join(dir, "b.txt"), content1, 0644)
 
+	// 用确定性时间设置 mtime，确保两次运行有足够差距
+	pastTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	os.Chtimes(filepath.Join(dir, "a.txt"), pastTime, pastTime)
+	os.Chtimes(filepath.Join(dir, "b.txt"), pastTime, pastTime)
+
 	idx := newTestIndex(t)
 	d := newDeduper(t)
 
 	// 第一次运行
 	d.Run(dir, nil, false, idx)
 
-	// 修改 b.txt（保持同 size），显式设置 mtime 确保超过 2 秒容差
+	// 修改 b.txt（保持同 size），设置新 mtime
 	os.WriteFile(filepath.Join(dir, "b.txt"), content2, 0644)
-	futureTime := time.Now().Add(5 * time.Second)
+	futureTime := time.Date(2020, 1, 1, 0, 0, 10, 0, time.UTC) // 比 pastTime 晚 10 秒
 	os.Chtimes(filepath.Join(dir, "b.txt"), futureTime, futureTime)
 
 	// 第二次运行：b.txt 内容变化，不应与 a.txt 重复
