@@ -597,15 +597,24 @@ func TestDedup_Incremental_FileChanged(t *testing.T) {
 	content1 := []byte("original content 12345")
 	content2 := []byte("modified content 123456") // 不同 size，确保内容变化可被检测
 
-	// 第一次运行：两个相同内容的文件
+	// 创建两个相同内容的文件
 	os.WriteFile(filepath.Join(dir, "a.txt"), content1, 0644)
 	os.WriteFile(filepath.Join(dir, "b.txt"), content1, 0644)
 
 	idx := newTestIndex(t)
 	d := newDeduper(t)
-	d.Run(dir, nil, false, idx)
 
-	// 修改 b.txt 内容（size 也变化），通过 size 变化触发增量检测
+	// 预填充索引：模拟第一次运行后的状态（a.txt 和 b.txt 哈希相同）
+	absA := filepath.Join(dir, "a.txt")
+	absB := filepath.Join(dir, "b.txt")
+	hash1, err := d.hasher.HashFile(absA) // 两者内容相同，hash 一致
+	if err != nil {
+		t.Fatalf("hash a.txt: %v", err)
+	}
+	idx.Put(absA, fileindex.FileState{Size: int64(len(content1)), Mtime: time.Now(), Hash: hash1})
+	idx.Put(absB, fileindex.FileState{Size: int64(len(content1)), Mtime: time.Now(), Hash: hash1})
+
+	// 修改 b.txt 内容（size 也变化）
 	os.WriteFile(filepath.Join(dir, "b.txt"), content2, 0644)
 
 	// 第二次运行：b.txt 内容变化，不应与 a.txt 重复
