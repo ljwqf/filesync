@@ -2,7 +2,7 @@
 
 将多个源目录**增量同步**到移动 SSD 的内容去重备份工具。基于 CAS(内容寻址存储)实现去重,支持断点续传、并发拷贝、文件系统自适应(NTFS 硬链接 / exFAT 复制回退)与原子索引。
 
-面向 Windows amd64。
+跨平台支持: Windows、Linux、macOS。
 
 ---
 
@@ -16,7 +16,9 @@
 - **拷贝后校验**:可选哈希校验。小文件(≤ 1 MiB)始终强制校验,大文件可配置。
 - **冲突保护**:目标已存在同名但内容不同的文件时,旧文件自动移入 `.filesync/conflict/`,不会被静默覆盖丢失。
 - **空间预检**:同步前预估所需空间,不足时提前报错而非中途失败。
-- **重复文件去重**:独立 `dedup` 命令扫描任意文件夹,将内容重复的文件用硬链接去重(NTFS),exFAT 仅报告。
+- **增量去重**:独立 `dedup` 命令支持增量模式,首次全量扫描后自动缓存文件状态,后续运行只重算变化文件的哈希,大幅加速重复扫描。
+- **重复文件去重**:扫描任意文件夹,对内容重复的文件用硬链接去重(NTFS),exFAT 仅报告。
+- **双向同步**:新增 `bisync` 命令,支持两个相似文件夹的双向同步,自动检测两端变化并合并,支持 4 种冲突策略(keep-both/left-wins/right-wins/newer-wins)。
 
 ---
 
@@ -81,7 +83,8 @@ filesync status   [--config FILE]
 filesync verify   [--config FILE]
 filesync reindex  [--config FILE]
 filesync prune    [--config FILE] [--dry-run]
-filesync dedup    <目录> [--dry-run] [--readonly] [--exclude PATTERN]...
+filesync dedup    <目录> [--index PATH] [--dry-run] [--readonly] [--exclude PATTERN]...
+filesync bisync   --left DIR --right DIR [--dry-run] [--workers N] [--conflict STRATEGY] [--exclude PATTERN]...
 ```
 
 ### `sync` — 同步
@@ -130,7 +133,10 @@ filesync.exe dedup D:\Photos --dry-run            # 先预览重复文件
 filesync.exe dedup D:\Photos                       # 执行去重（保持可写，适合工作目录）
 filesync.exe dedup D:\Photos --readonly            # 去重后设只读（归档场景，防误编辑污染硬链接副本）
 filesync.exe dedup D:\Photos --exclude "**/*.tmp"  # 排除临时文件
+filesync.exe dedup D:\Photos --index my-index.db   # 指定增量索引路径
 ```
+
+> **增量模式**:默认在扫描目录下创建 `.dedup-index.db` 索引文件。首次运行全量扫描,后续运行仅重算变化文件的哈希,大幅加速。可用 `--index` 指定自定义路径。
 
 > **硬链接特性**:去重后各路径名地位平等,删除任意一个不影响其他副本(只要还有引用,内容不释放)。但**修改任意一个会同步影响所有副本**——因为它们指向同一物理内容。
 >
@@ -140,17 +146,39 @@ filesync.exe dedup D:\Photos --exclude "**/*.tmp"  # 排除临时文件
 >
 > **安全说明**:已是硬链接的文件(同一物理文件)自动跳过;被替换文件的 mtime 保留。建议先用 `--dry-run` 预览。
 
+### `bisync` — 双向同步
+扫描两个目录,检测两端的变化(新增/修改/删除),并将变化同步到另一端。两端各存一份索引(冗余容灾),支持 4 种冲突策略。该命令独立于同步配置,无需 `config.yaml`。
+
+```bash
+filesync.exe bisync --left D:\Project --right E:\Backup --dry-run        # 先预览
+filesync.exe bisync --left D:\Project --right E:\Backup                  # 执行同步
+filesync.exe bisync --left D:\Project --right E:\Backup --conflict newer-wins  # mtime 新的覆盖旧的
+filesync.exe bisync --left D:\Project --right E:\Backup --exclude "**/*.log"   # 排除日志文件
+```
+
+> **冲突策略**:
+> - `keep-both`(默认):两端都保留,冲突文件重命名为 `*.conflict-left` / `*.conflict-right`
+> - `left-wins`:左端覆盖右端
+> - `right-wins`:右端覆盖左端
+> - `newer-wins`:mtime 更新的一端覆盖另一端
+
+> **索引机制**:两端各存 `.bisync-index.db`,记录各自目录在上次同步后的文件状态。通过对比当前状态与上次状态检测变化。即使交换 left/right 角色,索引仍能正确工作(索引跟随目录,不跟随角色)。
+
 ### 全局选项
 
 | 选项 | 适用命令 | 说明 |
 |------|----------|------|
 | `--config FILE` | `sync`/`status`/`verify`/`reindex`/`prune` | 配置文件路径(默认 `config.yaml`) |
-| `--workers N` | `sync` | 临时覆盖并发数(`0` = 用配置默认) |
-| `--dry-run` | `sync` / `prune` / `dedup` | 只扫描/预览,不实际改动文件 |
+| `--workers N` | `sync`/`bisync` | 临时覆盖并发数(`0` = 用配置默认) |
+| `--dry-run` | `sync`/`prune`/`dedup`/`bisync` | 只扫描/预览,不实际改动文件 |
 | `--verify` | `sync` | 强制开启拷贝后校验 |
 | `--no-verify` | `sync` | 禁用大文件校验(小文件 ≤ 1 MiB 仍强制校验)。与 `--verify` 同时给出时以 `--no-verify` 为准 |
-| `--exclude PATTERN` | `dedup` | 排除模式(`**` 递归 glob,可重复) |
+| `--index PATH` | `dedup` | 增量索引路径(默认 `.dedup-index.db`) |
+| `--exclude PATTERN` | `dedup`/`bisync` | 排除模式(`**` 递归 glob,可重复) |
 | `--readonly` | `dedup` | 去重后将文件设为只读(归档场景,防误编辑污染硬链接副本) |
+| `--left DIR` | `bisync` | 左端目录 |
+| `--right DIR` | `bisync` | 右端目录 |
+| `--conflict STRATEGY` | `bisync` | 冲突策略: `keep-both`/`left-wins`/`right-wins`/`newer-wins` |
 
 ---
 
@@ -210,7 +238,7 @@ go test -race ./...      # 含竞态检测
 go test -cover ./...     # 覆盖率
 ```
 
-当前共 **95 个测试**,覆盖 16 个包,`go vet ./...` 无问题。
+当前共 **123 个测试**,覆盖 19 个包,`go vet ./...` 无问题。
 
 ### CI/CD
 
@@ -285,6 +313,30 @@ go test -cover ./...     # 覆盖率
 | RefCount=0 清理 | `prune` 命令显式清理，未实现异步清理通道 |
 | errgroup | 保留 WaitGroup，与错误隔离语义冲突 |
 
+
+### 2026-06-30 增量去重 + 双向同步
+
+新增三项核心功能：
+
+**增量去重索引 (`internal/fileindex`)**
+- 新增轻量级 bbolt 包，存储文件状态 `{path → {size, mtime, hash}}`
+- 被 dedup 和 bisync 共用，避免重复实现
+
+**增量去重 (`internal/dedup` 改造)**
+- `Run()` 新增可选 `idx` 参数，传入时启用增量模式
+- 首次全量扫描并缓存哈希，后续仅重算 (size/mtime) 变化的文件
+- 新增 `--index` CLI 参数指定索引路径（默认 `.dedup-index.db`）
+- 新增 9 个增量场景测试
+
+**双向同步 (`internal/bisync`)**
+- 新增 `bisync` 命令：`filesync bisync --left DIR --right DIR`
+- 扫描两端目录，对比索引检测变化（新增/修改/删除）
+- 4 种冲突策略：`keep-both`（默认）/ `left-wins` / `right-wins` / `newer-wins`
+- 两端各存 `.bisync-index.db`，记录各自上次同步后的状态，冗余容灾
+- 索引跟随目录不跟随角色，交换 left/right 仍正确工作
+- 新增 18 个测试
+
+**测试总计**: 123 个（原 95 + fileindex 9 + dedup 增量 9 + bisync 18）
 
 ### 2026-06-29 跨平台重构 + CI/CD 配置
 

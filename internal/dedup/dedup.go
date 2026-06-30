@@ -1,6 +1,8 @@
 // Package dedup 扫描文件夹，对内容重复的文件用硬链接去重。
 // NTFS: 将重复文件替换为指向同一物理副本的硬链接（所有原始路径仍可访问，磁盘只存一份）。
 // exFAT/FAT32: 不支持硬链接，仅报告重复组不做修改。
+//
+// 支持增量模式：传入 FileIndex 时，仅重算变化文件的哈希，大幅加速重复运行。
 package dedup
 
 import (
@@ -9,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ljwqf/filesync/internal/fileindex"
 	"github.com/ljwqf/filesync/internal/hasher"
 	"github.com/ljwqf/filesync/internal/paths"
 	"github.com/ljwqf/filesync/internal/scanner"
@@ -61,73 +64,109 @@ func (d *Deduper) setLinkFn(fn func(oldname, newname string) error) { d.linkFn =
 
 // Run 扫描 dir，识别重复文件并（若支持硬链接）去重。
 // dryRun=true 时仅报告不修改任何文件。
-func (d *Deduper) Run(dir string, exclude []string, dryRun bool) (Stats, error) {
+// idx 可选：传入时启用增量模式，仅重算变化文件的哈希；nil 则全量扫描。
+func (d *Deduper) Run(dir string, exclude []string, dryRun bool, idx fileindex.FileIndex) (Stats, error) {
 	var stats Stats
 
-	// 1. 扫描
+	// 1. 扫描目录
 	files, _, err := scanner.Scan(dir, exclude)
 	if err != nil {
 		return stats, fmt.Errorf("scan %s: %w", dir, err)
 	}
 	stats.Scanned = int64(len(files))
 
-	// 2. 按 size 分组（size 相同才可能内容相同）
-	sizeGroups := map[int64][]scanner.FileInfo{}
+	// 2. 构建当前文件索引 map（absPath → scanner.FileInfo）
+	currentFiles := make(map[string]scanner.FileInfo, len(files))
 	for _, f := range files {
-		sizeGroups[f.Size] = append(sizeGroups[f.Size], f)
+		currentFiles[f.AbsPath] = f
 	}
 
-	// 3. 对 size>1 的组并发算哈希
-	type fileHash struct {
+	// 3. 增量检测：确定需要计算哈希的文件
+	type needHash struct {
 		fi   scanner.FileInfo
-		hash string
-		err  error
+		hash string // 若从索引复用则非空
 	}
-	hashCh := make(chan scanner.FileInfo)
-	resultCh := make(chan fileHash, 64)
-	var wg sync.WaitGroup
-	for i := 0; i < d.workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for fi := range hashCh {
-				key, err := d.hasher.HashFile(paths.Long(fi.AbsPath))
-				resultCh <- fileHash{fi: fi, hash: key, err: err}
-			}
-		}()
+
+	if idx == nil {
+		// 无索引：全量模式，所有 size>=2 的候选文件都需哈希
+		return d.runFull(files, dryRun)
 	}
-	go func() {
-		for _, group := range sizeGroups {
-			// size=0 的空文件或单文件组无重复可能，跳过
-			if len(group) < 2 {
+
+	// 增量模式：读取索引，对比 (size, mtime) 确定变化文件
+	indexed := make(map[string]fileindex.FileState)
+	if err := idx.Iterate(func(path string, s fileindex.FileState) bool {
+		indexed[path] = s
+		return true
+	}); err != nil {
+		return stats, fmt.Errorf("read index: %w", err)
+	}
+
+	// 收集需要哈希的文件（新增或变化）
+	var toHash []scanner.FileInfo
+	puts := make(map[string]fileindex.FileState)
+	var deletes []string
+
+	for absPath, fi := range currentFiles {
+		if s, ok := indexed[absPath]; ok {
+			if fileindex.IsUnchanged(s, fi.Size, fi.Mtime) && s.Hash != "" {
+				// 未变化且有哈希记录：复用
 				continue
 			}
-			for _, fi := range group {
-				hashCh <- fi
-			}
+			// 变化：需重算哈希
+			toHash = append(toHash, fi)
+		} else {
+			// 新增文件
+			toHash = append(toHash, fi)
 		}
-		close(hashCh)
-	}()
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
+	}
 
-	// 4. 按 (size, hash) 分组
+	// 已删除的文件
+	for absPath := range indexed {
+		if _, ok := currentFiles[absPath]; !ok {
+			deletes = append(deletes, absPath)
+		}
+	}
+
+	// 4. 并发计算哈希（仅变化文件）
+	hashResults := d.hashFiles(toHash)
+
+	// 将哈希结果写入 puts
+	for _, r := range hashResults {
+		if r.err != nil {
+			continue
+		}
+		puts[r.fi.AbsPath] = fileindex.FileState{
+			Size:   r.fi.Size,
+			Mtime:  r.fi.Mtime,
+			Hash:   r.hash,
+		}
+	}
+
+	// 5. 按 (size, hash) 分组查找重复
 	type groupKey struct {
 		size int64
 		hash string
 	}
 	hashGroups := map[groupKey][]scanner.FileInfo{}
-	for r := range resultCh {
+
+	// 先加入未变化的文件（复用索引哈希）
+	for absPath, fi := range currentFiles {
+		if s, ok := indexed[absPath]; ok && s.Hash != "" && fileindex.IsUnchanged(s, fi.Size, fi.Mtime) {
+			k := groupKey{size: fi.Size, hash: s.Hash}
+			hashGroups[k] = append(hashGroups[k], fi)
+		}
+	}
+
+	// 再加入变化/新增文件的哈希结果
+	for _, r := range hashResults {
 		if r.err != nil {
-			continue // 哈希失败的文件跳过
+			continue
 		}
 		k := groupKey{size: r.fi.Size, hash: r.hash}
 		hashGroups[k] = append(hashGroups[k], r.fi)
 	}
 
-	// 5. 收集重复组（len>1）
+	// 6. 收集重复组（len>1）
 	for k, group := range hashGroups {
 		if len(group) < 2 {
 			continue
@@ -144,8 +183,12 @@ func (d *Deduper) Run(dir string, exclude []string, dryRun bool) (Stats, error) 
 		stats.Groups = append(stats.Groups, dg)
 	}
 
-	// 6. 去重（仅 hardlink 模式且非 dryRun）
+	// 7. 去重（仅 hardlink 模式且非 dryRun）
 	if !d.hardlink || dryRun {
+		// 即使不执行去重，也要更新索引
+		if !dryRun && len(puts) > 0 || len(deletes) > 0 {
+			idx.ApplyBatch(puts, deletes)
+		}
 		return stats, nil
 	}
 	for i := range stats.Groups {
@@ -154,17 +197,138 @@ func (d *Deduper) Run(dir string, exclude []string, dryRun bool) (Stats, error) 
 			continue // 单组失败不影响其他组
 		}
 		stats.DedupedFiles += int64(len(deduped))
-			stats.BytesSaved += int64(len(deduped)) * stats.Groups[i].Size
-			stats.Groups[i].Deduped = deduped
-			// 归档场景：去重后将整组设为只读，防止误编辑污染所有硬链接副本。
-			// 追踪 chmod 失败，避免误导用户认为文件已受保护。
-			if d.readonly && len(deduped) > 0 {
-				for _, f := range stats.Groups[i].Files {
-					if err := os.Chmod(paths.Long(f), 0444); err != nil {
-						stats.ReadonlyFailed++
-					}
+		stats.BytesSaved += int64(len(deduped)) * stats.Groups[i].Size
+		stats.Groups[i].Deduped = deduped
+		// 归档场景：去重后将整组设为只读，防止误编辑污染所有硬链接副本。
+		if d.readonly && len(deduped) > 0 {
+			for _, f := range stats.Groups[i].Files {
+				if err := os.Chmod(paths.Long(f), 0444); err != nil {
+					stats.ReadonlyFailed++
 				}
 			}
+		}
+	}
+
+	// 8. 更新索引
+	if len(puts) > 0 || len(deletes) > 0 {
+		idx.ApplyBatch(puts, deletes)
+	}
+
+	return stats, nil
+}
+
+// fileHashResult 是单个文件的哈希计算结果。
+type fileHashResult struct {
+	fi   scanner.FileInfo
+	hash string
+	err  error
+}
+
+// hashFiles 并发计算一批文件的哈希，返回结果列表（保持原始顺序）。
+func (d *Deduper) hashFiles(files []scanner.FileInfo) []fileHashResult {
+	if len(files) == 0 {
+		return nil
+	}
+
+	results := make([]fileHashResult, len(files))
+	hashCh := make(chan int, len(files))
+	var wg sync.WaitGroup
+
+	// 发送所有索引
+	for i := range files {
+		hashCh <- i
+	}
+	close(hashCh)
+
+	// worker 池
+	for i := 0; i < d.workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range hashCh {
+				fi := files[idx]
+				key, err := d.hasher.HashFile(paths.Long(fi.AbsPath))
+				results[idx] = fileHashResult{fi: fi, hash: key, err: err}
+			}
+		}()
+	}
+	wg.Wait()
+
+	return results
+}
+
+// runFull 全量模式：无索引时的原始逻辑。
+func (d *Deduper) runFull(files []scanner.FileInfo, dryRun bool) (Stats, error) {
+	var stats Stats
+	stats.Scanned = int64(len(files))
+
+	// 按 size 分组
+	sizeGroups := map[int64][]scanner.FileInfo{}
+	for _, f := range files {
+		sizeGroups[f.Size] = append(sizeGroups[f.Size], f)
+	}
+
+	// 对 size>=2 的组并发算哈希
+	var candidates []scanner.FileInfo
+	for _, group := range sizeGroups {
+		if len(group) < 2 {
+			continue
+		}
+		candidates = append(candidates, group...)
+	}
+
+	hashResults := d.hashFiles(candidates)
+
+	// 按 (size, hash) 分组
+	type groupKey struct {
+		size int64
+		hash string
+	}
+	hashGroups := map[groupKey][]scanner.FileInfo{}
+	for _, r := range hashResults {
+		if r.err != nil {
+			continue
+		}
+		k := groupKey{size: r.fi.Size, hash: r.hash}
+		hashGroups[k] = append(hashGroups[k], r.fi)
+	}
+
+	// 收集重复组
+	for k, group := range hashGroups {
+		if len(group) < 2 {
+			continue
+		}
+		dg := DupGroup{
+			Hash: k.hash,
+			Size: k.size,
+		}
+		for _, fi := range group {
+			dg.Files = append(dg.Files, fi.AbsPath)
+		}
+		dg.Representative = dg.Files[0]
+		stats.DuplicateFiles += int64(len(dg.Files) - 1)
+		stats.Groups = append(stats.Groups, dg)
+	}
+
+	// 去重
+	if !d.hardlink || dryRun {
+		return stats, nil
+	}
+	for i := range stats.Groups {
+		deduped, err := d.hardlinkGroup(&stats.Groups[i])
+		if err != nil {
+			continue
+		}
+		stats.DedupedFiles += int64(len(deduped))
+		stats.BytesSaved += int64(len(deduped)) * stats.Groups[i].Size
+		stats.Groups[i].Deduped = deduped
+		if d.readonly && len(deduped) > 0 {
+			for _, f := range stats.Groups[i].Files {
+				if err := os.Chmod(paths.Long(f), 0444); err != nil {
+					stats.ReadonlyFailed++
+				}
+			}
+		}
 	}
 
 	return stats, nil
@@ -200,7 +364,6 @@ func (d *Deduper) hardlinkGroup(group *DupGroup) ([]string, error) {
 	}
 
 	// 备份代表文件 mtime：rename/link 会修改 inode mtime，需在去重后统一还原。
-	// 硬链接共享 inode，整组只能有一个 mtime，统一用代表文件的。
 	repMtime := repInfo.ModTime()
 
 	for i := 1; i < len(group.Files); i++ {
@@ -210,7 +373,7 @@ func (d *Deduper) hardlinkGroup(group *DupGroup) ([]string, error) {
 		// 已是同一物理文件（已是硬链接）则跳过
 		fi, err := os.Stat(fileLong)
 		if err != nil {
-			continue // 文件可能已被处理或删除
+			continue
 		}
 		if os.SameFile(repInfo, fi) {
 			continue
@@ -226,27 +389,25 @@ func (d *Deduper) hardlinkGroup(group *DupGroup) ([]string, error) {
 		// 安全去重：先 rename 到临时路径，再创建硬链接，失败则回滚
 		tmpPath := fileLong + ".filesync.dedup"
 		if err := os.Rename(fileLong, tmpPath); err != nil {
-			continue // rename 失败，原文件未受影响
+			continue
 		}
 
 		// 创建指向代表文件的硬链接
 		if err := d.linkFn(repLong, fileLong); err != nil {
-			// 链接失败：将临时文件 rename 回原路径，恢复原文件
 			if rerr := os.Rename(tmpPath, fileLong); rerr != nil {
 				fmt.Fprintf(os.Stderr, "警告: 回滚失败，原始文件已移至 %s，请手动恢复: %v\n", tmpPath, rerr)
 			}
 			continue
 		}
 
-		// 链接成功：删除临时文件（原文件的备份）
+		// 链接成功：删除临时文件
 		if err := os.Remove(tmpPath); err != nil {
 			fmt.Fprintf(os.Stderr, "警告: 删除临时文件失败 %s: %v\n", tmpPath, err)
 		}
 		deduped = append(deduped, filePath)
 	}
 
-	// 组内去重全部完成：还原代表文件 mtime（硬链接共享 inode，此操作统一设置整组 mtime）。
-	// 放在循环外、最后执行，避免被组内后续操作覆盖。
+	// 组内去重全部完成：还原代表文件 mtime
 	if len(deduped) > 0 {
 		if err := os.Chtimes(repLong, time.Now(), repMtime); err != nil {
 			fmt.Fprintf(os.Stderr, "警告: 还原 mtime 失败 %s: %v\n", group.Representative, err)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ljwqf/filesync/internal/cas"
+	"github.com/ljwqf/filesync/internal/fileindex"
 	"github.com/ljwqf/filesync/internal/hasher"
 )
 
@@ -28,7 +29,7 @@ func TestDedup_BasicDedup(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "unique.txt"), []byte("unique"), 0644)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestDedup_DifferentContentNotDeduped(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "z.txt"), []byte("content_z"), 0644)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestDedup_AlreadyHardlinked(t *testing.T) {
 	os.Link(filepath.Join(dir, "orig.txt"), filepath.Join(dir, "link.txt"))
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestDedup_DryRun(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, true) // dryRun
+	stats, err := d.Run(dir, nil, true, nil) // dryRun
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestDedup_EmptyFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "e3.txt"), []byte{}, 0644)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestDedup_PreservesMtime(t *testing.T) {
 	os.Chtimes(filepath.Join(dir, "b.txt"), specificTime, specificTime)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestDedup_PreservesMtimeBothRoles(t *testing.T) {
 		os.Chtimes(filepath.Join(dir, customFile), customTime, customTime)
 
 		d := newDeduper(t)
-		stats, err := d.Run(dir, nil, false)
+		stats, err := d.Run(dir, nil, false, nil)
 		if err != nil {
 			t.Fatalf("Run (%s): %v", scenario, err)
 		}
@@ -267,7 +268,7 @@ func TestDedup_Report(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b2.txt"), []byte("abcde"), 0644)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -299,7 +300,7 @@ func TestDedup_NestedDirs(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "sub2", "b.txt"), content, 0644)
 
 	d := newDeduper(t)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -315,7 +316,7 @@ func TestDedup_ExFATReportOnly(t *testing.T) {
 
 	// hardlink=false 模拟 exFAT
 	d := New(hasher.New(), 4, false)
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -339,7 +340,7 @@ func TestDedup_ReadonlyArchive(t *testing.T) {
 
 	d := newDeduper(t)
 	d.SetReadonly(true)
-	_, err := d.Run(dir, nil, false)
+	_, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -372,7 +373,7 @@ func TestDedup_WritableByDefault(t *testing.T) {
 
 	d := newDeduper(t)
 	// 不设 readonly（默认 false，工作目录场景）
-	_, err := d.Run(dir, nil, false)
+	_, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -404,7 +405,7 @@ func TestDedup_LinkFailureRollback(t *testing.T) {
 		return fmt.Errorf("simulated link failure (disk full)")
 	})
 
-	stats, err := d.Run(dir, nil, false)
+	stats, err := d.Run(dir, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -443,3 +444,273 @@ func TestDedup_LinkFailureRollback(t *testing.T) {
 		t.Errorf("temp file %s should be cleaned up after rollback", tmpPath)
 	}
 }
+
+// ==================== 增量去重测试 ====================
+
+func newTestIndex(t *testing.T) fileindex.FileIndex {
+	t.Helper()
+	idx, err := fileindex.Open(filepath.Join(t.TempDir(), "test-index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { idx.Close() })
+	return idx
+}
+
+func TestDedup_Incremental_FirstRun(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("incremental content")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "unique.txt"), []byte("other"), 0644)
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+	stats, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Scanned != 3 {
+		t.Errorf("Scanned = %d, want 3", stats.Scanned)
+	}
+	if len(stats.Groups) != 1 {
+		t.Fatalf("Groups = %d, want 1", len(stats.Groups))
+	}
+	if stats.DuplicateFiles != 1 {
+		t.Errorf("DuplicateFiles = %d, want 1", stats.DuplicateFiles)
+	}
+
+	// 验证索引已写入
+	count := 0
+	idx.Iterate(func(path string, s fileindex.FileState) bool {
+		count++
+		if s.Hash == "" {
+			t.Errorf("index entry %s has empty hash", path)
+		}
+		return true
+	})
+	if count != 3 {
+		t.Errorf("index entries = %d, want 3", count)
+	}
+}
+
+func TestDedup_Incremental_SecondRunNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("no changes content")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+
+	// 第一次运行：全量
+	stats1, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats1.Groups) != 1 {
+		t.Fatalf("first run groups = %d, want 1", len(stats1.Groups))
+	}
+
+	// 第二次运行：无变化，应跳过所有哈希计算
+	stats2, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 仍然能检测到重复组（从索引复用哈希）
+	if len(stats2.Groups) != 1 {
+		t.Errorf("second run groups = %d, want 1", len(stats2.Groups))
+	}
+}
+
+func TestDedup_Incremental_NewFileDetected(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("incremental content")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+
+	// 第一次运行
+	d.Run(dir, nil, false, idx)
+
+	// 新增一个相同内容的文件
+	os.WriteFile(filepath.Join(dir, "c.txt"), content, 0644)
+
+	// 第二次运行：应检测到 c.txt 并将其加入重复组
+	stats, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Groups) != 1 {
+		t.Fatalf("Groups = %d, want 1", len(stats.Groups))
+	}
+	if len(stats.Groups[0].Files) != 3 {
+		t.Errorf("group files = %d, want 3 (a, b, c)", len(stats.Groups[0].Files))
+	}
+	if stats.DuplicateFiles != 2 {
+		t.Errorf("DuplicateFiles = %d, want 2", stats.DuplicateFiles)
+	}
+}
+
+func TestDedup_Incremental_FileDeleted(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("delete test")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "c.txt"), content, 0644)
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+
+	// 第一次运行：3 个重复文件
+	stats1, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats1.DuplicateFiles != 2 {
+		t.Fatalf("first run DuplicateFiles = %d, want 2", stats1.DuplicateFiles)
+	}
+
+	// 删除 c.txt
+	os.Remove(filepath.Join(dir, "c.txt"))
+
+	// 第二次运行：只剩 2 个重复文件
+	stats2, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats2.DuplicateFiles != 1 {
+		t.Errorf("second run DuplicateFiles = %d, want 1", stats2.DuplicateFiles)
+	}
+
+	// 验证索引中 c.txt 已删除
+	_, ok, _ := idx.Get(filepath.Join(dir, "c.txt"))
+	if ok {
+		t.Error("c.txt should be removed from index")
+	}
+}
+
+func TestDedup_Incremental_FileChanged(t *testing.T) {
+	dir := t.TempDir()
+	content1 := []byte("original content 12345")
+	content2 := []byte("modified content 12345") // 同 size 不同内容
+	os.WriteFile(filepath.Join(dir, "a.txt"), content1, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content1, 0644)
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+
+	// 第一次运行
+	d.Run(dir, nil, false, idx)
+
+	// 修改 b.txt（保持同 size），显式设置 mtime 确保超过 2 秒容差
+	os.WriteFile(filepath.Join(dir, "b.txt"), content2, 0644)
+	futureTime := time.Now().Add(5 * time.Second)
+	os.Chtimes(filepath.Join(dir, "b.txt"), futureTime, futureTime)
+
+	// 第二次运行：b.txt 内容变化，不应与 a.txt 重复
+	stats, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Groups) != 0 {
+		t.Errorf("Groups = %d, want 0 (b.txt changed)", len(stats.Groups))
+	}
+}
+
+func TestDedup_Incremental_NoIndex_FallsBackToFull(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("fallback test")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
+
+	d := newDeduper(t)
+	// idx=nil → 全量模式
+	stats, err := d.Run(dir, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Groups) != 1 {
+		t.Errorf("Groups = %d, want 1", len(stats.Groups))
+	}
+}
+
+func TestDedup_Incremental_DryRunDoesNotUpdateIndex(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("dryrun index test")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), content, 0644)
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+
+	// dry-run 不应写入索引
+	d.Run(dir, nil, true, idx)
+
+	count := 0
+	idx.Iterate(func(path string, s fileindex.FileState) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Errorf("index entries after dry-run = %d, want 0", count)
+	}
+}
+
+func TestDedup_Incremental_ExistingHardlinksSkipped(t *testing.T) {
+	if cas.DetectMode(t.TempDir()) != cas.ModeHardlink {
+		t.Skip("requires hardlink support")
+	}
+	dir := t.TempDir()
+	content := []byte("hardlink skip test")
+	os.WriteFile(filepath.Join(dir, "a.txt"), content, 0644)
+	os.Link(filepath.Join(dir, "a.txt"), filepath.Join(dir, "b.txt"))
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+	stats, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 已是硬链接，不应重复去重
+	if stats.DedupedFiles != 0 {
+		t.Errorf("DedupedFiles = %d, want 0 (already hardlinked)", stats.DedupedFiles)
+	}
+}
+
+func TestDedup_Incremental_LargeScale(t *testing.T) {
+	dir := t.TempDir()
+	// 创建 100 个文件，分为 10 组重复
+	for i := 0; i < 10; i++ {
+		content := []byte(fmt.Sprintf("group-%d-content-here", i))
+		for j := 0; j < 10; j++ {
+			name := fmt.Sprintf("g%d_f%d.txt", i, j)
+			os.WriteFile(filepath.Join(dir, name), content, 0644)
+		}
+	}
+
+	idx := newTestIndex(t)
+	d := newDeduper(t)
+
+	// 第一次运行
+	stats1, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats1.Groups) != 10 {
+		t.Fatalf("first run Groups = %d, want 10", len(stats1.Groups))
+	}
+
+	// 第二次运行（无变化）：应快速完成（复用索引哈希）
+	stats2, err := d.Run(dir, nil, false, idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats2.Groups) != 10 {
+		t.Errorf("second run Groups = %d, want 10", len(stats2.Groups))
+	}
+}
+
+// ==================== 需要的 import ====================

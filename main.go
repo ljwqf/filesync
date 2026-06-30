@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/ljwqf/filesync/internal/bisync"
 	"github.com/ljwqf/filesync/internal/cas"
 	"github.com/ljwqf/filesync/internal/config"
 	"github.com/ljwqf/filesync/internal/dedup"
+	"github.com/ljwqf/filesync/internal/fileindex"
 	"github.com/ljwqf/filesync/internal/hasher"
 	"github.com/ljwqf/filesync/internal/index"
 	"github.com/ljwqf/filesync/internal/lock"
@@ -33,6 +35,12 @@ func main() {
 	// dedup 命令不依赖 config，独立处理
 	if cmd == "dedup" {
 		runDedup(os.Args[2:])
+		return
+	}
+
+	// bisync 命令独立处理
+	if cmd == "bisync" {
+		runBisync(os.Args[2:])
 		return
 	}
 
@@ -225,7 +233,8 @@ func usage() {
   filesync verify [--config FILE]
   filesync reindex [--config FILE]
   filesync prune [--config FILE] [--dry-run]
-  filesync dedup <目录> [--dry-run] [--readonly] [--exclude PATTERN]...
+  filesync dedup <目录> [--index PATH] [--dry-run] [--readonly] [--exclude PATTERN]...
+  filesync bisync --left DIR --right DIR [--dry-run] [--workers N] [--conflict STRATEGY] [--exclude PATTERN]...
 
 选项:
   --config FILE    配置文件路径（默认 config.yaml）
@@ -233,8 +242,12 @@ func usage() {
   --dry-run        只扫描不拷贝
   --verify         强制开启拷贝后哈希校验（小文件始终强制校验）
   --no-verify      禁用大文件校验（小文件仍强制校验）
-  --exclude        排除模式（dedup 用，可重复）
-  --readonly       去重后将文件设为只读（dedup 归档场景）`)
+  --index PATH     增量索引路径（dedup 用，默认 .dedup-index.db）
+  --exclude        排除模式（dedup/bisync 用，可重复）
+  --readonly       去重后将文件设为只读（dedup 归档场景）
+  --left DIR       左端目录（bisync 用）
+  --right DIR      右端目录（bisync 用）
+  --conflict STR   冲突策略（bisync 用）: keep-both / left-wins / right-wins / newer-wins`)
 }
 
 // runDedup 执行 dedup 子命令：扫描目录去重重复文件。
@@ -242,21 +255,35 @@ func runDedup(args []string) {
 	fs := flag.NewFlagSet("dedup", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "只报告不修改")
 	readonly := fs.Bool("readonly", false, "去重后将文件设为只读（归档场景，防止误编辑污染硬链接副本）")
+	indexPath := fs.String("index", "", "增量索引路径（可选，默认在扫描目录同级创建 .dedup-index.db）")
 	var exclude multiFlag
 	fs.Var(&exclude, "exclude", "排除模式（** 递归 glob，可重复）")
 	fs.Parse(args)
 
 	posArgs := fs.Args()
 	if len(posArgs) < 1 {
-		fatal("用法: filesync dedup <目录> [--dry-run] [--readonly] [--exclude PATTERN]...")
+		fatal("用法: filesync dedup <目录> [--index PATH] [--dry-run] [--readonly] [--exclude PATTERN]...")
 	}
 	dir := posArgs[0]
+
+	// 确定索引路径
+	dbPath := *indexPath
+	if dbPath == "" {
+		dbPath = filepath.Join(dir, ".dedup-index.db")
+	}
+
+	// 打开索引（不存在则创建）
+	idx, err := fileindex.Open(dbPath)
+	if err != nil {
+		fatal("打开索引失败: %v", err)
+	}
+	defer idx.Close()
 
 	// 检测文件系统是否支持硬链接
 	hardlink := cas.DetectMode(dir) == cas.ModeHardlink
 	d := dedup.New(hasher.New(), 8, hardlink)
 	d.SetReadonly(*readonly)
-	stats, err := d.Run(dir, exclude, *dryRun)
+	stats, err := d.Run(dir, exclude, *dryRun, idx)
 	if err != nil {
 		fatal("去重失败: %v", err)
 	}
@@ -307,6 +334,52 @@ func (m *multiFlag) String() string { return "" }
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
+}
+
+// runBisync 执行双向同步子命令。
+func runBisync(args []string) {
+	fs := flag.NewFlagSet("bisync", flag.ExitOnError)
+	left := fs.String("left", "", "左端目录")
+	right := fs.String("right", "", "右端目录")
+	dryRun := fs.Bool("dry-run", false, "只检测不执行")
+	workers := fs.Int("workers", 8, "并发数")
+	conflict := fs.String("conflict", "keep-both", "冲突策略: keep-both / left-wins / right-wins / newer-wins")
+	var exclude multiFlag
+	fs.Var(&exclude, "exclude", "排除模式（** 递归 glob，可重复）")
+	fs.Parse(args)
+
+	if *left == "" || *right == "" {
+		fatal("用法: filesync bisync --left DIR --right DIR [--dry-run] [--workers N] [--conflict STRATEGY] [--exclude PATTERN]...")
+	}
+
+	cfg := &bisync.Config{
+		Left:     *left,
+		Right:    *right,
+		Workers:  *workers,
+		Conflict: bisync.ConflictStrategy(*conflict),
+		Exclude:  exclude,
+	}
+
+	b := bisync.New(cfg)
+	stats, err := b.Sync(*dryRun)
+	if err != nil {
+		fatal("双向同步失败: %v", err)
+	}
+
+	// 输出报告
+	fmt.Printf("\n=== 双向同步完成 ===\n")
+	fmt.Printf("左端文件: %d\n", stats.ScannedLeft)
+	fmt.Printf("右端文件: %d\n", stats.ScannedRight)
+	fmt.Printf("左→右复制: %d\n", stats.LeftToRight)
+	fmt.Printf("右→左复制: %d\n", stats.RightToLeft)
+	fmt.Printf("冲突: %d\n", stats.Conflicts)
+	fmt.Printf("左端删除: %d\n", stats.DeletedLeft)
+	fmt.Printf("右端删除: %d\n", stats.DeletedRight)
+	fmt.Printf("未变化: %d\n", stats.Unchanged)
+	fmt.Printf("复制字节: %d\n", stats.BytesCopied)
+	if *dryRun {
+		fmt.Println("\n（dry-run 模式，未修改文件）")
+	}
 }
 
 func fatal(format string, a ...any) {

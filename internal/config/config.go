@@ -23,6 +23,17 @@ type Config struct {
 	Verify     *bool           `yaml:"verify"`
 	Sources    []SourceMapping `yaml:"sources"`
 	Exclude    []string        `yaml:"exclude"`
+
+	// 双向同步配置
+	Mode   string      `yaml:"mode"`   // "sync" (默认) | "bisync"
+	Bisync *BisyncConfig `yaml:"bisync"`
+}
+
+// BisyncConfig 是双向同步配置。
+type BisyncConfig struct {
+	Left     string `yaml:"left"`
+	Right    string `yaml:"right"`
+	Conflict string `yaml:"conflict"` // keep-both / left-wins / right-wins / newer-wins
 }
 
 // Load 从 path 读取并校验配置。
