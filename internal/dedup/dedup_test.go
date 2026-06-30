@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -593,6 +594,9 @@ func TestDedup_Incremental_FileDeleted(t *testing.T) {
 }
 
 func TestDedup_Incremental_FileChanged(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("os.Chtimes with past/future times unreliable on Linux tmpfs")
+	}
 	dir := t.TempDir()
 	content1 := []byte("original content 12345")
 	content2 := []byte("modified content 12345") // 同 size 不同内容
