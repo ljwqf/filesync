@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/ljwqf/filesync/internal/cas"
@@ -16,7 +17,6 @@ import (
 	"github.com/ljwqf/filesync/internal/index"
 	"github.com/ljwqf/filesync/internal/paths"
 	"github.com/ljwqf/filesync/internal/scanner"
-
 )
 
 // nowFn 可被测试覆盖的时间函数。
@@ -50,6 +50,20 @@ type Report struct {
 	Locked     []string // 被占用/锁定而跳过的文件
 }
 
+type syncCandidate struct {
+	fi      scanner.FileInfo
+	relPath string
+	destAbs string
+	old     index.FileRecord
+	oldOK   bool
+}
+
+type hashResult struct {
+	candidate syncCandidate
+	key       string
+	err       error
+}
+
 // Sync 执行完整同步。
 func (s *Syncer) Sync() (Report, error) {
 	return s.SyncWithContext(context.Background())
@@ -80,8 +94,10 @@ func (s *Syncer) run(ctx context.Context, dryRun bool) (Report, error) {
 	defer idx.Close()
 
 	h := hasher.New()
+	var candidates []syncCandidate
 	var tasks []copier.Task
 	var skipped int64
+	fastSkip := metadataFastSkip(s.cfg)
 
 	for _, src := range s.cfg.Sources {
 		files, dirs, err := scanner.Scan(src.Src, s.cfg.Exclude)
@@ -102,41 +118,65 @@ func (s *Syncer) run(ctx context.Context, dryRun bool) (Report, error) {
 
 		for _, fi := range files {
 			relPath := filepath.ToSlash(filepath.Join(src.Dest, fi.RelPath))
-			// 哈希（长路径前缀绕过 Windows 260 限制）
-			key, err := h.HashFile(paths.Long(fi.AbsPath))
-			if err != nil {
-				skipped++
-				continue
-			}
 			// 查索引：断点续传判定
 			old, ok, _ := idx.GetFile(relPath)
-			if ok && old.Size == fi.Size && old.ObjectKey == key && paths.MtimeClose(old.Mtime, fi.Mtime) {
+			if fastSkip && ok && old.Size == fi.Size && old.ObjectKey != "" && paths.MtimeClose(old.Mtime, fi.Mtime) {
 				skipped++
 				continue
 			}
-			// (size, objectKey) 匹配但 mtime 不同 → 仅更新索引 mtime，跳过拷贝
-			if ok && old.Size == fi.Size && old.ObjectKey == key && !paths.MtimeClose(old.Mtime, fi.Mtime) {
-				if !dryRun {
-					idx.PutFile(relPath, index.FileRecord{
-						Size: fi.Size, Mtime: fi.Mtime, ObjectKey: key, SyncedAt: nowFn(),
-					})
-				}
-				skipped++
-				continue
-			}
-			tasks = append(tasks, copier.Task{
-				SrcAbs:    fi.AbsPath,
-				DestAbs:   filepath.Join(s.cfg.TargetRoot, src.Dest, fi.RelPath),
-				RelPath:   relPath,
-				ObjectKey: key,
-				Size:      fi.Size,
-				Mtime:     fi.Mtime,
+			candidates = append(candidates, syncCandidate{
+				fi:      fi,
+				relPath: relPath,
+				destAbs: filepath.Join(s.cfg.TargetRoot, src.Dest, fi.RelPath),
+				old:     old,
+				oldOK:   ok,
 			})
 		}
 	}
 
+	hashResults := hashCandidates(ctx, h, candidates, s.cfg.Workers)
+	var metadataOps []index.SyncOp
+	for _, r := range hashResults {
+		if r.err != nil {
+			skipped++
+			continue
+		}
+		fi := r.candidate.fi
+		key := r.key
+		old := r.candidate.old
+		ok := r.candidate.oldOK
+		relPath := r.candidate.relPath
+
+		// (size, objectKey) 匹配但 mtime 不同 → 仅更新索引 mtime，跳过拷贝
+		if ok && old.Size == fi.Size && old.ObjectKey == key && !paths.MtimeClose(old.Mtime, fi.Mtime) {
+			if !dryRun {
+				metadataOps = append(metadataOps, index.SyncOp{
+					RelPath: relPath,
+					NewRecord: index.FileRecord{
+						Size: fi.Size, Mtime: fi.Mtime, ObjectKey: key, SyncedAt: nowFn(),
+					},
+					OldObjectKey: old.ObjectKey,
+				})
+			}
+			skipped++
+			continue
+		}
+		tasks = append(tasks, copier.Task{
+			SrcAbs:       fi.AbsPath,
+			DestAbs:      r.candidate.destAbs,
+			RelPath:      relPath,
+			ObjectKey:    key,
+			OldObjectKey: old.ObjectKey,
+			Size:         fi.Size,
+			Mtime:        fi.Mtime,
+		})
+	}
+
 	if dryRun {
 		return Report{Skipped: skipped}, nil
+	}
+	if err := idx.ApplySyncResults(metadataOps); err != nil {
+		return Report{}, fmt.Errorf("update metadata-only records: %w", err)
 	}
 
 	c, err := cas.New(s.cfg.TargetRoot, objectsRoot)
@@ -161,6 +201,7 @@ func (s *Syncer) run(ctx context.Context, dryRun bool) (Report, error) {
 
 	cp := copier.New(c, idx, h, s.cfg.Workers)
 	cp.SetVerify(s.cfg.Verify)
+	cp.SetSmallFileVerify(smallFileVerify(s.cfg))
 	cp.SetTargetRoot(s.cfg.TargetRoot)
 	if s.progress != nil {
 		cp.SetProgress(s.progress)
@@ -178,10 +219,64 @@ func (s *Syncer) run(ctx context.Context, dryRun bool) (Report, error) {
 	}, nil
 }
 
+func hashCandidates(ctx context.Context, h hasher.Hasher, candidates []syncCandidate, workers int) []hashResult {
+	results := make([]hashResult, len(candidates))
+	if len(candidates) == 0 {
+		return results
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				candidate := candidates[idx]
+				results[idx].candidate = candidate
+				if err := ctx.Err(); err != nil {
+					results[idx].err = err
+					continue
+				}
+				key, err := h.HashFile(paths.Long(candidate.fi.AbsPath))
+				results[idx].key = key
+				results[idx].err = err
+			}
+		}()
+	}
+	for i := range candidates {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+func smallFileVerify(cfg *config.Config) bool {
+	if cfg.VerifySmallFiles == nil {
+		return true
+	}
+	return *cfg.VerifySmallFiles
+}
+
+func metadataFastSkip(cfg *config.Config) bool {
+	if cfg.MetadataFastSkip == nil {
+		return true
+	}
+	return *cfg.MetadataFastSkip
+}
+
 // estimateSpaceNeeded 预估同步所需空间（设计 §10）。
 // NTFS: 仅新增 object 大小之和（已存在的 object 不重拷，硬链接零额外空间）。
 // exFAT: 临时 object 拷后即删，峰值≈并发 worker 数 × 最大文件大小（保守上界，
-//        避免多 worker 同时拷入大文件时预估不足导致磁盘中途写满）。
+//
+//	避免多 worker 同时拷入大文件时预估不足导致磁盘中途写满）。
 func estimateSpaceNeeded(c cas.CAS, tasks []copier.Task, workers int) int64 {
 	if c.Mode() == cas.ModeHardlink {
 		// NTFS: 仅统计 object 物理不存在的任务 size

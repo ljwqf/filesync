@@ -101,6 +101,16 @@ sources:
 	} else if !*cfg.Verify {
 		t.Errorf("default Verify = false, want true")
 	}
+	if cfg.VerifySmallFiles == nil {
+		t.Errorf("default VerifySmallFiles = nil, want non-nil (true)")
+	} else if !*cfg.VerifySmallFiles {
+		t.Errorf("default VerifySmallFiles = false, want true")
+	}
+	if cfg.MetadataFastSkip == nil {
+		t.Errorf("default MetadataFastSkip = nil, want non-nil (true)")
+	} else if !*cfg.MetadataFastSkip {
+		t.Errorf("default MetadataFastSkip = false, want true")
+	}
 }
 
 func TestLoad_VerifyExplicitFalse(t *testing.T) {
@@ -124,6 +134,54 @@ sources:
 	}
 	if *cfg.Verify {
 		t.Errorf("Verify = true, want false")
+	}
+}
+
+func TestLoad_VerifySmallFilesExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `target_root: ` + yamlString(testRoot()) + `
+verify_small_files: false
+sources:
+  - src: ` + yamlString(testSrc()) + `
+    dest: "Project"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.VerifySmallFiles == nil {
+		t.Fatal("VerifySmallFiles = nil, want non-nil (false)")
+	}
+	if *cfg.VerifySmallFiles {
+		t.Errorf("VerifySmallFiles = true, want false")
+	}
+}
+
+func TestLoad_MetadataFastSkipExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `target_root: ` + yamlString(testRoot()) + `
+metadata_fast_skip: false
+sources:
+  - src: ` + yamlString(testSrc()) + `
+    dest: "Project"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.MetadataFastSkip == nil {
+		t.Fatal("MetadataFastSkip = nil, want non-nil (false)")
+	}
+	if *cfg.MetadataFastSkip {
+		t.Errorf("MetadataFastSkip = true, want false")
 	}
 }
 

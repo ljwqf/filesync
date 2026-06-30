@@ -412,12 +412,14 @@ window.services = {
   },
 
   // Sync command
-  async sync(configPath, workers, dryRun, verify, noVerify) {
+  async sync(configPath, workers, dryRun, verify, noVerify, noSmallVerify, strictHashScan) {
     const args = ['sync', '--config', configPath];
     if (workers > 0) args.push('--workers', String(workers));
     if (dryRun) args.push('--dry-run');
     if (verify) args.push('--verify');
     if (noVerify) args.push('--no-verify');
+    if (noSmallVerify) args.push('--no-small-verify');
+    if (strictHashScan) args.push('--strict-hash-scan');
     return runCommand(args, { cancelId: 'sync' });
   },
 
@@ -557,6 +559,12 @@ Single-page app with tab navigation. Each command gets a section.
           <div class="form-group">
             <label><input type="checkbox" id="sync-verify"> Verify</label>
           </div>
+          <div class="form-group">
+            <label><input type="checkbox" id="sync-no-small-verify"> No Small Verify</label>
+          </div>
+          <div class="form-group">
+            <label><input type="checkbox" id="sync-strict-hash"> Strict Hash Scan</label>
+          </div>
         </div>
         <div class="btn-row">
           <button class="btn-primary" onclick="runSync()">Start Sync</button>
@@ -662,7 +670,7 @@ Single-page app with tab navigation. Each command gets a section.
           </div>
         </div>
         <div class="form-group">
-          <textarea id="config-editor" rows="20" placeholder="target_root: /path/to/target&#10;workers: 8&#10;verify: true&#10;sources:&#10;  - src: /path/to/source&#10;    dest: relative/dest"></textarea>
+          <textarea id="config-editor" rows="20" placeholder="target_root: /path/to/target&#10;workers: 8&#10;verify: true&#10;verify_small_files: true&#10;metadata_fast_skip: true&#10;sources:&#10;  - src: /path/to/source&#10;    dest: relative/dest"></textarea>
         </div>
         <div class="btn-row">
           <button class="btn-primary" onclick="saveConfigFile()">Save Config</button>
@@ -776,10 +784,12 @@ async function runSync() {
   const dryRun = document.getElementById('sync-dryrun').checked;
   const verify = document.getElementById('sync-verify').checked;
   const noVerify = false;
+  const noSmallVerify = document.getElementById('sync-no-small-verify').checked;
+  const strictHashScan = document.getElementById('sync-strict-hash').checked;
   setOutput('sync-output', 'Syncing...', '');
   document.getElementById('sync-cancel').disabled = false;
   try {
-    const result = await window.services.sync(config, workers, dryRun, verify, noVerify);
+    const result = await window.services.sync(config, workers, dryRun, verify, noVerify, noSmallVerify, strictHashScan);
     const type = result.code === 0 ? 'success' : 'error';
     setOutput('sync-output', result.stdout + '\n' + result.stderr, type);
   } catch (e) {

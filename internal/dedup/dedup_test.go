@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -594,27 +593,20 @@ func TestDedup_Incremental_FileDeleted(t *testing.T) {
 }
 
 func TestDedup_Incremental_FileChanged(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("os.Chtimes with past/future times unreliable on Linux tmpfs")
-	}
 	dir := t.TempDir()
 	content1 := []byte("original content 12345")
-	content2 := []byte("modified content 12345") // 同 size 不同内容
+	content2 := []byte("modified content 123456") // 不同 size，确保内容变化可被检测
 
-	// 创建文件，设置 mtime 为 10 秒后（确保后续修改能产生足够 mtime 差异）
-	futureTime := time.Now().Add(10 * time.Second)
+	// 第一次运行：两个相同内容的文件
 	os.WriteFile(filepath.Join(dir, "a.txt"), content1, 0644)
-	os.Chtimes(filepath.Join(dir, "a.txt"), futureTime, futureTime)
 	os.WriteFile(filepath.Join(dir, "b.txt"), content1, 0644)
-	os.Chtimes(filepath.Join(dir, "b.txt"), futureTime, futureTime)
 
 	idx := newTestIndex(t)
 	d := newDeduper(t)
 	d.Run(dir, nil, false, idx)
 
-	// 修改 b.txt 并设置 mtime 为当前时间（比 futureTime 早 10 秒）
+	// 修改 b.txt 内容（size 也变化），通过 size 变化触发增量检测
 	os.WriteFile(filepath.Join(dir, "b.txt"), content2, 0644)
-	os.Chtimes(filepath.Join(dir, "b.txt"), time.Now(), time.Now())
 
 	// 第二次运行：b.txt 内容变化，不应与 a.txt 重复
 	stats, err := d.Run(dir, nil, false, idx)

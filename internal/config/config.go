@@ -18,14 +18,16 @@ type SourceMapping struct {
 // Config 是同步工具的运行配置。
 // Verify 用 *bool 以区分"配置中省略"(默认 true) 与"显式设为 false"。
 type Config struct {
-	TargetRoot string          `yaml:"target_root"`
-	Workers    int             `yaml:"workers"`
-	Verify     *bool           `yaml:"verify"`
-	Sources    []SourceMapping `yaml:"sources"`
-	Exclude    []string        `yaml:"exclude"`
+	TargetRoot       string          `yaml:"target_root"`
+	Workers          int             `yaml:"workers"`
+	Verify           *bool           `yaml:"verify"`
+	VerifySmallFiles *bool           `yaml:"verify_small_files"`
+	MetadataFastSkip *bool           `yaml:"metadata_fast_skip"`
+	Sources          []SourceMapping `yaml:"sources"`
+	Exclude          []string        `yaml:"exclude"`
 
 	// 双向同步配置
-	Mode   string      `yaml:"mode"`   // "sync" (默认) | "bisync"
+	Mode   string        `yaml:"mode"` // "sync" (默认) | "bisync"
 	Bisync *BisyncConfig `yaml:"bisync"`
 }
 
@@ -65,6 +67,14 @@ func (c *Config) normalize() error {
 	if c.Verify == nil {
 		t := true
 		c.Verify = &t
+	}
+	if c.VerifySmallFiles == nil {
+		t := true
+		c.VerifySmallFiles = &t
+	}
+	if c.MetadataFastSkip == nil {
+		t := true
+		c.MetadataFastSkip = &t
 	}
 	for i := range c.Sources {
 		s := &c.Sources[i]

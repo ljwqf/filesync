@@ -49,6 +49,8 @@ type Index interface {
 	DeleteObject(key string) error
 	// ApplySyncResult 在单事务内原子应用一次同步结果。
 	ApplySyncResult(op SyncOp) error
+	// ApplySyncResults 在单事务内原子应用一批同步结果。
+	ApplySyncResults(ops []SyncOp) error
 	// ApplyReindexBatch 在单事务内原子应用一批 reindex 写操作。
 	// 确保崩溃后索引不会出现 file 记录已写但 object RefCount 未更新的不一致状态。
 	ApplyReindexBatch(fileRecs map[string]FileRecord, objectRecs map[string]ObjectRecord) error
@@ -149,34 +151,44 @@ func (b *boltIndex) DeleteObject(key string) error {
 //  3. 旧 objectKey（若与新不同）RefCount--，归 0 标记 orphaned
 //  4. 新 objectKey RefCount++（若已存在则累加）
 func (b *boltIndex) ApplySyncResult(op SyncOp) error {
+	return b.ApplySyncResults([]SyncOp{op})
+}
+
+// ApplySyncResults 在单个 bbolt Update 事务内原子完成一批同步结果。
+func (b *boltIndex) ApplySyncResults(ops []SyncOp) error {
+	if len(ops) == 0 {
+		return nil
+	}
 	return b.db.Update(func(tx *bolt.Tx) error {
 		fb := tx.Bucket(filesBucket)
 		ob := tx.Bucket(objectsBucket)
 
-		// 写新文件记录
-		op.NewRecord.SyncedAt = time.Now()
-		data, err := json.Marshal(op.NewRecord)
-		if err != nil {
-			return err
-		}
-		if err := fb.Put([]byte(op.RelPath), data); err != nil {
-			return err
-		}
-
-		newKey := op.NewRecord.ObjectKey
-
-		// 旧 object RefCount 递减（仅当旧 key 存在且与新 key 不同）
-		if op.OldObjectKey != "" && op.OldObjectKey != newKey {
-			if err := decRefCount(ob, op.OldObjectKey); err != nil {
+		for _, op := range ops {
+			// 写新文件记录
+			op.NewRecord.SyncedAt = time.Now()
+			data, err := json.Marshal(op.NewRecord)
+			if err != nil {
 				return err
 			}
-		}
-
-		// 新 object RefCount 递增（仅当旧 key 不同，避免同 key 重复计数）。
-		// 旧==新 表示文件内容未变，RefCount 不变。
-		if op.OldObjectKey != newKey {
-			if err := incRefCount(ob, newKey, op.NewRecord.Size); err != nil {
+			if err := fb.Put([]byte(op.RelPath), data); err != nil {
 				return err
+			}
+
+			newKey := op.NewRecord.ObjectKey
+
+			// 旧 object RefCount 递减（仅当旧 key 存在且与新 key 不同）
+			if op.OldObjectKey != "" && op.OldObjectKey != newKey {
+				if err := decRefCount(ob, op.OldObjectKey); err != nil {
+					return err
+				}
+			}
+
+			// 新 object RefCount 递增（仅当旧 key 不同，避免同 key 重复计数）。
+			// 旧==新 表示文件内容未变，RefCount 不变。
+			if op.OldObjectKey != newKey {
+				if err := incRefCount(ob, newKey, op.NewRecord.Size); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

@@ -246,7 +246,7 @@ func TestCopier_ContextCancelSkipsRemaining(t *testing.T) {
 	// 准备多个文件
 	var tasks []Task
 	for i := 0; i < 5; i++ {
-		name := string(rune('a' + i)) + ".txt"
+		name := string(rune('a'+i)) + ".txt"
 		os.WriteFile(filepath.Join(srcDir, name), []byte("content"+string(rune('a'+i))), 0644)
 		key, _ := h.HashFile(filepath.Join(srcDir, name))
 		tasks = append(tasks, Task{
@@ -313,23 +313,26 @@ func TestCopier_ProgressCallback(t *testing.T) {
 
 // TestCopier_ShouldVerify 验证小文件强制校验、大文件按开关的逻辑。
 func TestCopier_ShouldVerify(t *testing.T) {
-	small := int64(100)            // < 1 MiB
-	large := verifyThreshold + 1   // > 1 MiB
+	small := int64(100)          // < 1 MiB
+	large := verifyThreshold + 1 // > 1 MiB
 	cases := []struct {
-		verify bool
-		size   int64
-		want   bool
+		verify          bool
+		verifySmallFile bool
+		size            int64
+		want            bool
 	}{
-		{false, small, true},  // 小文件即使 verify=false 也强制校验
-		{true, small, true},   // 小文件 verify=true 当然校验
-		{false, large, false}, // 大文件 verify=false 不校验
-		{true, large, true},   // 大文件 verify=true 校验
-		{false, verifyThreshold, true}, // 恰好等于阈值，强制校验
+		{false, true, small, true},           // 小文件默认强制校验
+		{false, false, small, false},         // 小文件强制校验可关闭
+		{true, false, small, true},           // verify=true 时仍校验
+		{false, true, large, false},          // 大文件 verify=false 不校验
+		{true, true, large, true},            // 大文件 verify=true 校验
+		{false, true, verifyThreshold, true}, // 恰好等于阈值，强制校验
 	}
 	for _, c := range cases {
-		got := shouldVerify(c.verify, c.size)
+		got := shouldVerify(c.verify, c.verifySmallFile, c.size)
 		if got != c.want {
-			t.Errorf("shouldVerify(verify=%v, size=%d) = %v, want %v", c.verify, c.size, got, c.want)
+			t.Errorf("shouldVerify(verify=%v, verifySmallFile=%v, size=%d) = %v, want %v",
+				c.verify, c.verifySmallFile, c.size, got, c.want)
 		}
 	}
 }

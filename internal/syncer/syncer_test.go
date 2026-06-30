@@ -85,6 +85,38 @@ func TestSyncer_MtimeOnlyChangeSkipsCopy(t *testing.T) {
 	}
 }
 
+func TestSyncer_StrictHashScanDetectsSameMetadataChange(t *testing.T) {
+	s, targetRoot, srcDir := setupSyncer(t)
+	fast := false
+	s.cfg.MetadataFastSkip = &fast
+
+	srcFile := filepath.Join(srcDir, "a.txt")
+	os.WriteFile(srcFile, []byte("aaaa"), 0644)
+	if _, err := s.Sync(); err != nil {
+		t.Fatalf("initial Sync: %v", err)
+	}
+	info, err := os.Stat(srcFile)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	mtime := info.ModTime()
+
+	os.WriteFile(srcFile, []byte("bbbb"), 0644)
+	os.Chtimes(srcFile, mtime, mtime)
+
+	rep, err := s.Sync()
+	if err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if rep.Copied != 1 {
+		t.Errorf("strict scan copied = %d, want 1", rep.Copied)
+	}
+	got, _ := os.ReadFile(filepath.Join(targetRoot, "Project", "a.txt"))
+	if string(got) != "bbbb" {
+		t.Errorf("dest = %q, want bbbb", got)
+	}
+}
+
 func TestSyncer_DedupAcrossSources(t *testing.T) {
 	targetRoot := t.TempDir()
 	dirA := t.TempDir()
@@ -160,10 +192,10 @@ func TestEstimateSpaceNeeded_NTFS(t *testing.T) {
 	c.EnsureObject(src, "h3:existing")
 
 	tasks := []copier.Task{
-		{ObjectKey: "h3:existing", Size: 100},           // 已存在，不计
-		{ObjectKey: "h3:new1", Size: 200},               // 新增，计 200
-		{ObjectKey: "h3:new1", Size: 200},               // 同 key 已计，不重复
-		{ObjectKey: "h3:new2", Size: 300},               // 新增，计 300
+		{ObjectKey: "h3:existing", Size: 100}, // 已存在，不计
+		{ObjectKey: "h3:new1", Size: 200},     // 新增，计 200
+		{ObjectKey: "h3:new1", Size: 200},     // 同 key 已计，不重复
+		{ObjectKey: "h3:new2", Size: 300},     // 新增，计 300
 	}
 	got := estimateSpaceNeeded(c, tasks, 8)
 	if got != 500 {

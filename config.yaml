@@ -8,6 +8,8 @@ target_root: "E:\\PSSD_sync"      # 目标盘根（绝对路径）
 
 workers: 8                          # 并发拷贝数（默认 8）
 verify: true                        # 拷贝后校验哈希（默认 true）
+verify_small_files: true            # 小文件强制校验（默认 true；海量小文件可设 false）
+metadata_fast_skip: true            # size+mtime 未变则跳过 hash（默认 true；严格内容扫描可设 false）
 
 sources:
   - src: "D:\\Project\\Go_project"  # 源目录（绝对路径）

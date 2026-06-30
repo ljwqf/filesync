@@ -152,6 +152,40 @@ func TestApplySyncResult_SameObjectKey(t *testing.T) {
 	}
 }
 
+func TestApplySyncResults_Batch(t *testing.T) {
+	idx := newTestIndex(t)
+	idx.PutFile("old.txt", FileRecord{Size: 3, ObjectKey: "h3:old"})
+	idx.PutObject("h3:old", ObjectRecord{RefCount: 1, Size: 3})
+
+	ops := []SyncOp{
+		{
+			RelPath:      "old.txt",
+			NewRecord:    FileRecord{Size: 3, ObjectKey: "h3:new"},
+			OldObjectKey: "h3:old",
+		},
+		{
+			RelPath:   "fresh.txt",
+			NewRecord: FileRecord{Size: 5, ObjectKey: "h3:fresh"},
+		},
+	}
+	if err := idx.ApplySyncResults(ops); err != nil {
+		t.Fatalf("ApplySyncResults: %v", err)
+	}
+
+	oldObj, _, _ := idx.GetObject("h3:old")
+	if oldObj.RefCount != 0 {
+		t.Errorf("old RefCount = %d, want 0", oldObj.RefCount)
+	}
+	newObj, _, _ := idx.GetObject("h3:new")
+	if newObj.RefCount != 1 {
+		t.Errorf("new RefCount = %d, want 1", newObj.RefCount)
+	}
+	freshObj, _, _ := idx.GetObject("h3:fresh")
+	if freshObj.RefCount != 1 {
+		t.Errorf("fresh RefCount = %d, want 1", freshObj.RefCount)
+	}
+}
+
 func TestIterateFiles(t *testing.T) {
 	idx := newTestIndex(t)
 	idx.PutFile("a.txt", FileRecord{Size: 1, ObjectKey: "h3:a"})

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/ljwqf/filesync/internal/bisync"
 	"github.com/ljwqf/filesync/internal/cas"
@@ -48,8 +49,10 @@ func main() {
 	configPath := fs.String("config", "config.yaml", "配置文件路径")
 	workers := fs.Int("workers", 0, "并发数（0=用配置默认）")
 	dryRun := fs.Bool("dry-run", false, "只扫描不拷贝")
-	verifyFlag := fs.Bool("verify", false, "拷贝后校验哈希（小文件始终强制校验）")
-	noVerifyFlag := fs.Bool("no-verify", false, "禁用大文件校验（小文件仍强制校验）")
+	verifyFlag := fs.Bool("verify", false, "拷贝后校验哈希（小文件默认强制校验）")
+	noVerifyFlag := fs.Bool("no-verify", false, "禁用大文件校验（小文件默认仍强制校验）")
+	noSmallVerifyFlag := fs.Bool("no-small-verify", false, "禁用小文件强制校验")
+	noMetadataFastSkipFlag := fs.Bool("no-metadata-fast-skip", false, "禁用 size+mtime 快速跳过，所有候选文件均计算内容哈希")
 	fs.Parse(os.Args[2:])
 
 	cfg, err := config.Load(*configPath)
@@ -61,6 +64,14 @@ func main() {
 	}
 	// verify CLI 覆盖：--verify 强制开，--no-verify 强制关，均不指定用配置默认
 	cfg.ApplyVerifyOverride(*verifyFlag, *noVerifyFlag)
+	if *noSmallVerifyFlag {
+		f := false
+		cfg.VerifySmallFiles = &f
+	}
+	if *noMetadataFastSkipFlag {
+		f := false
+		cfg.MetadataFastSkip = &f
+	}
 
 	switch cmd {
 	case "sync":
@@ -79,14 +90,20 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		s := syncer.New(cfg)
-		// 进度回调：每完成一个文件输出一行
+		// 进度回调：节流输出，避免大量小文件时控制台刷新成为瓶颈。
 		var done int64
+		var lastProgress time.Time
 		s.SetProgress(func(e syncer.ProgressEvent) {
 			done++
 			status := "✓"
 			if !e.Copied {
 				status = "✗"
 			}
+			now := time.Now()
+			if done > 1 && e.Copied && now.Sub(lastProgress) < 200*time.Millisecond {
+				return
+			}
+			lastProgress = now
 			fmt.Fprintf(os.Stderr, "\r[%d] %s %s", done, status, e.RelPath)
 		})
 		var rep syncer.Report
@@ -228,7 +245,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `filesync - 文件同步备份工具
 
 用法:
-  filesync sync [--config FILE] [--workers N] [--dry-run] [--verify | --no-verify]
+  filesync sync [--config FILE] [--workers N] [--dry-run] [--verify | --no-verify] [--no-small-verify] [--no-metadata-fast-skip]
   filesync status [--config FILE]
   filesync verify [--config FILE]
   filesync reindex [--config FILE]
@@ -240,8 +257,10 @@ func usage() {
   --config FILE    配置文件路径（默认 config.yaml）
   --workers N      并发拷贝数（0=用配置默认）
   --dry-run        只扫描不拷贝
-  --verify         强制开启拷贝后哈希校验（小文件始终强制校验）
-  --no-verify      禁用大文件校验（小文件仍强制校验）
+  --verify         强制开启拷贝后哈希校验（小文件默认强制校验）
+  --no-verify      禁用大文件校验（小文件默认仍强制校验）
+  --no-small-verify 禁用小文件强制校验
+  --no-metadata-fast-skip 禁用 size+mtime 快速跳过，所有候选文件均计算内容哈希
   --index PATH     增量索引路径（dedup 用，默认 .dedup-index.db）
   --exclude        排除模式（dedup/bisync 用，可重复）
   --readonly       去重后将文件设为只读（dedup 归档场景）

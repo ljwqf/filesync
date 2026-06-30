@@ -85,11 +85,13 @@ type SourceMapping struct {
     Dest string   `yaml:"dest"`
 }
 type Config struct {
-    TargetRoot string           `yaml:"target_root"`
-    Workers    int              `yaml:"workers"`
-    Verify     bool             `yaml:"verify"`
-    Sources    []SourceMapping  `yaml:"sources"`
-    Exclude    []string         `yaml:"exclude"`
+    TargetRoot       string           `yaml:"target_root"`
+    Workers          int              `yaml:"workers"`
+    Verify           *bool            `yaml:"verify"`
+    VerifySmallFiles *bool            `yaml:"verify_small_files"`
+    MetadataFastSkip *bool            `yaml:"metadata_fast_skip"`
+    Sources          []SourceMapping  `yaml:"sources"`
+    Exclude          []string         `yaml:"exclude"`
 }
 
 // scanner
@@ -153,11 +155,11 @@ type CAS interface {
 1. 加载 config.yaml → 得到 [(源路径, 目标子路径), ...]
 2. 对每个源目录:
    a. scanner 扫描 → []FileInfo (path, size, mtime)，应用 exclude 过滤
-   b. hasher 计算 objectKey = xxh3(file content) — 始终基于内容
-   c. 查 index.db:
-      - (路径, size, mtime, objectKey) 全匹配 → 跳过 (断点续传)
-      - (路径, size, objectKey) 匹配但 mtime 不同 → 仅更新索引 mtime，跳过拷贝
-      - 否则 → 生成同步任务 {srcAbs, destAbs, objectKey, size}
+   b. 查 index.db。默认启用 `metadata_fast_skip`：若 (路径, size, mtime) 与已同步记录匹配且 objectKey 非空 → 直接跳过，不读取文件内容。严格内容扫描可用 `metadata_fast_skip: false` 或 `--strict-hash-scan`
+   c. 对未快跳过的候选文件按 `workers` 并发计算 objectKey = xxh3(file content) — 始终基于内容
+   d. 比对索引:
+      - (路径, size, objectKey) 匹配但 mtime 不同 → 批量更新索引 mtime，跳过拷贝
+      - 否则 → 生成同步任务 {srcAbs, destAbs, objectKey, size, oldObjectKey}
 3. syncer 编排同步任务 → copier worker 池 (并发度默认8, --workers可配)
    每个 worker:
    a. 重新 stat 源文件，若 mtime 或 size 与 FileInfo 不符 → 重算 objectKey
@@ -172,12 +174,12 @@ type CAS interface {
       - NTFS → 硬链接 object → destAbsPath
       - exFAT → 复制 object → destAbsPath
    f. exFAT: cas.RemoveTempObject(objectKey) 删除临时 object (同 objectKey 任务由路由保证串行; 该 worker 是此 key 的最后任务时删除)
-   g. 在**同一个 bbolt 事务**中:
+   g. 成功拷贝后生成索引更新操作；本轮成功结果在**批量 bbolt 事务**中统一落库:
       - 若 destAbsPath 旧记录存在且 objectKey 不同 → 旧 object RefCount-- (仅更新索引计数, **不在事务内做物理删除**)
       - 新 object PutFile + PutObject(RefCount++)
       - 若旧 object RefCount 归 0 → 在索引中标记 Orphaned（不立即物理删除）
    h. 物理删除由 `prune` 命令显式执行：用户运行 `filesync prune` 时，遍历 RefCount=0 的 object 物理删除 + 清索引记录。功能等价于异步通道，但需手动触发。**物理删除与索引事务解耦**: 索引已正确反映 RefCount=0，不影响正确性，仅产生可被 prune 清理的孤立文件
-   i. (可选) verify: 对 destAbsPath 重算哈希比对 objectKey
+   i. (可选) verify: 对 destAbsPath 重算哈希比对 objectKey。大文件由 `verify` 控制；小文件默认强制校验，可通过 `verify_small_files: false` 或 `--no-small-verify` 关闭
 4. report 输出: 已跳过 / 已拷贝 / 去重节省 / 失败统计
 ```
 
@@ -201,7 +203,7 @@ type CAS interface {
 
 两层分桶使桶数从 256 扩展到 65536，100 万 object 时每桶仅约 15 个文件，避免 exFAT 大目录性能退化。
 
-**关于"大小预筛"的保留**：scanner 输出 FileInfo 时仍带有 Size，用于 copier 中判断是否有必要重新哈希（size 变化一定需要重算），但不作为 objectKey 的一部分。
+**关于"大小预筛"的保留**：scanner 输出 FileInfo 时仍带有 Size，用于增量快跳过、mtime 容差判断和 copier 中判断是否有必要重新哈希（size 变化一定需要重算），但不作为 objectKey 的一部分。默认快跳过信任已同步记录的 `size + mtime`；需要抵御"内容变化但 size/mtime 被人为恢复"的场景时，应启用严格内容扫描。
 
 ## 6. 索引格式（index.db）
 
@@ -215,7 +217,7 @@ type CAS interface {
   - value = `ObjectRecord{Size, RefCount, StoredAt}`
 
 **重要写入保证**：
-- **原子性**：`PutFile` + `PutObject(RefCount++)` 在同一个 bbolt `Update` 事务中完成。一个文件的同步结果不会出现 files bucket 和 objects bucket 不一致。
+- **原子性**：`PutFile` + `PutObject(RefCount++)` 在同一个 bbolt `Update` 事务中完成。当前实现支持 `ApplySyncResults` 批量事务，一批文件的同步结果可一次落库；事务失败时整批不生效，不会出现 files bucket 和 objects bucket 不一致。
 - **RefCount 原子更新**：当目标路径被新文件覆盖，需在同一个事务中：
   1. `GetFile(relPath)` 查询旧 objectKey
   2. `PutFile(relPath, newRecord)` 更新文件记录
@@ -227,6 +229,7 @@ type CAS interface {
 ## 7. 并发与错误处理
 
 - **worker 池**：默认 8 个并发拷贝，`--workers` 可配
+- **候选哈希并发**：syncer 在生成拷贝任务前，对未被 `metadata_fast_skip` 跳过的候选文件按 `workers` 并发计算 xxh3，避免大量小文件在同步前串行 hash。
 - **任务路由（exFAT 临时 object 生命周期管理）**：同一 objectKey 的任务按 key 哈希分发到**固定 worker**（`workerIndex = hash(objectKey) % N`）。一个 worker 从 EnsureObject → PlaceFile → RemoveTempObject 全权负责其 key 的 object 生命周期，天然消除"别人还在用就删了"的竞态，无需跨 worker 引用计数同步。Worker 池负载均衡损失可接受（同内容 key 的文件通常不多）。NTFS 下 object 永久保留，无此约束
 - **大缓冲拷贝**：1MB buffer + `io.CopyBuffer`，避免小粒度 IO
 - **exFAT 大文件**：exFAT 单文件写入对簇对齐敏感，大 buffer 缓解
@@ -235,8 +238,8 @@ type CAS interface {
 - **错误隔离**：单个文件失败不中断整体，记入失败列表，最终报告列出
 - **中断恢复**：捕获 `SIGINT`，优雅停止分发新任务，等待进行中的 worker 完成；已更新索引的文件下次跳过；exFAT 中途崩溃可能残留临时 object，下次运行或 prune 清理
 - **物理删除与索引事务解耦**：旧 object RefCount 归 0 时，事务内仅标记 Orphaned 不立即物理删除（避免"FS 删除成功但事务回滚"或"事务成功但 FS 删除失败"的不一致）。物理删除由 `prune` 命令显式执行，删除失败仅产生孤立文件，不影响索引正确性
-- **校验**：`--verify`（默认 true）拷贝后对目标文件重算哈希比对 objectKey；小文件强制校验
-- **索引写入串行化**：bbolt 单写者，所有 worker 的索引更新经单一 channel 串行写入，避免写竞争。每个消息携带同事务内 PutFile+PutObject 的完整信息
+- **校验**：`--verify`（默认 true）拷贝后对目标文件重算哈希比对 objectKey；小文件默认强制校验，可通过 `verify_small_files: false` 或 `--no-small-verify` 关闭
+- **索引写入批量化**：bbolt 单写者语义由单个 `Update` 事务保证。copier worker 成功处理后收集 `SyncOp`，最终调用 `ApplySyncResults` 批量落库，减少海量小文件场景的事务次数。
 
 ## 8. 配置文件（config.yaml）
 
@@ -245,6 +248,8 @@ type CAS interface {
 target_root: "E:\\PSSD_sync"      # 目标盘根
 workers: 8                          # 并发数
 verify: true                        # 拷贝后校验
+verify_small_files: true            # 小文件强制校验，默认 true
+metadata_fast_skip: true            # size+mtime 未变则跳过 hash，默认 true
 sources:
   - src: "D:\\Project\\Go_project"
     dest: "Project/Go_project"      # 目标盘内相对路径 (正斜杠)
@@ -261,8 +266,10 @@ exclude:                            # 排除规则 (glob, 相对源根)
 ## 9. 命令行接口
 
 ```
-filesync sync [--config config.yaml] [--dry-run] [--workers N]
+filesync sync [--config config.yaml] [--dry-run] [--workers N] [--verify | --no-verify] [--no-small-verify] [--strict-hash-scan]
   # 执行同步。--dry-run 只扫描报告不拷贝
+  # --no-small-verify 关闭小文件强制校验
+  # --strict-hash-scan 禁用 size+mtime 快跳过，所有候选文件均计算内容哈希
 
 filesync status [--config config.yaml]
   # 显示索引状态: 已同步文件数、占用空间、去重节省量、object 数
@@ -294,7 +301,7 @@ filesync prune [--config config.yaml] [--dry-run]
 | 路径过长（Windows 260 限制） | 用 `\\?\` 前缀长路径支持 |
 | 中文/特殊字符路径 | 统一 UTF-8，Windows API 用宽字符 |
 | 文件被占用/锁定 | 跳过并记录，报告末尾列出 |
-| 目标盘空间不足 | 拷贝前预估总待拷贝量。NTFS: 仅新增的 object 大小之和(硬链接零额外)；exFAT: 所有待拷贝文件大小之和(临时 object 拷后即删, 峰值占用≈单 worker 最大文件, 可忽略)；不足时提前报错并列出可同步量 |
+| 目标盘空间不足 | 拷贝前预估总待拷贝量。NTFS: 仅新增的 object 大小之和(硬链接零额外)；exFAT: 临时 object 拷后即删, 峰值按 `workers × 最大待拷文件大小` 保守估计；不足时提前报错并列出可同步量 |
 | mtime 精度（FAT/exFAT 仅 2 秒） | 比对时 mtime 容差 ±2s，且强制比 size + objectKey |
 | 符号链接/快捷方式 | 默认跳过符号链接，记录；不跟随 |
 | 时间戳保留 | 拷贝后 `os.Chtimes` 保留源 mtime/atime |
@@ -309,7 +316,7 @@ filesync prune [--config config.yaml] [--dry-run]
 | object 存储桶平坦化 | 两层分桶 `objects/<2chars>/<4chars>/<key>`，100 万 object 时每桶仅 ~15 个文件，避免 exFAT 大目录性能退化 |
 | 哈希一致性校验 | `<algo>:<hex>` 格式使 index 可区分 hash 类型，便于未来扩展算法。当前算法前缀建议用 `h3:`（xxh3）而非泛化的 `h:`，避免未来新增算法时前缀歧义 |
 | 空文件 (size=0) | 哈希固定为常量 `99aa06d3014798d86001c324468d497f`（xxh3 空内容 128 位实测值），objectKey = `h3:99aa06d3014798d86001c324468d497f`；所有空文件复用同一 objectKey；NTFS 共享一个空 object，exFAT 各复制一份空文件（开销可忽略） |
-| 拷贝后校验 | 小文件（≤ 1 MiB）强制校验；大文件由 `--verify` 开关控制（默认 true）。小文件哈希快但损坏影响大，强制校验消除静默失败风险 |
+| 拷贝后校验 | 小文件（≤ 1 MiB）默认强制校验；大文件由 `--verify` 开关控制（默认 true）。海量小文件追求速度时可通过 `verify_small_files: false` 或 `--no-small-verify` 关闭小文件强制校验 |
 | 空目录 | scanner 记录空目录，syncer 在目标对应路径 mkdir 保留目录结构（不依赖文件存在性） |
 | exFAT 跨运行去重效果 | **仅单次运行内**有效：同内容文件共享一个临时 object，减少读源次数。跨运行时 object 已删，重复同步仍需读取源（与普通增量拷贝一致），额外开销仅为哈希重算。status/report 中对 exFAT 去重节省明确标注"单次运行内"，避免用户误期望跨运行跳过拷贝 |
 | Scanner 循环检测 | 使用 `filepath.WalkDir`（默认不跟随 symlink，本身安全）；额外记录 visited (device, inode) 集合，遇到已访问目录直接 `fs.SkipDir`，防御目录符号链接造成的循环。不跟随任何符号链接 |
@@ -403,7 +410,7 @@ file_sync/
 
 经两轮审查，原三项待确认已解决两项（路由方案与删除时机一并确定）。剩余一项：
 
-1. **verify 对大文件的性能权衡**：大文件重算哈希 doubles IO。当前设计：小文件强制 verify，大文件走 `--verify` 开关（默认 true）。实现时若大文件 verify 成为瓶颈，可考虑改为默认关闭大文件 verify、仅校验首尾采样段。此为实现期可调项，不影响设计评审通过。
+1. **verify 对大文件的性能权衡**：大文件重算哈希 doubles IO。当前实现：小文件默认强制 verify（可配置关闭），大文件走 `--verify` 开关（默认 true）。若大文件 verify 成为瓶颈，可考虑改为默认关闭大文件 verify、仅校验首尾采样段。此为实现期可调项，不影响设计评审通过。
 
 **已决项（记录备查）**：
 - exFAT 串行化方案 = **路由**（同 objectKey → 固定 worker）。曾考虑 per-key Mutex，因引入跨 worker 引用计数同步而放弃。
@@ -454,6 +461,19 @@ file_sync/
 - **§7 SIGINT 中断**：context 取消传递，优雅停止
 - **§10 空间预检**：拷贝前预估，不足报错
 - **§10 文件锁定**：共享违规错误识别与跳过
-- **§7 小文件强制校验**：≤1 MiB 始终校验
+- **§7 小文件强制校验**：≤1 MiB 默认强制校验，后续已增加可配置开关
 - **§3 进度展示**：ProgressFunc 回调
 - **§9 CLI verify flag**：`--verify`/`--no-verify`
+
+### 16.6 小文件同步性能优化（2026-07-01）
+
+**设计 §4**：扫描后对每个文件计算内容哈希，再与索引比对生成任务；同步成功后逐文件提交索引更新；小文件校验始终强制。
+
+**实现**：为海量小文件场景增加四项性能优化：
+
+- 默认启用 `metadata_fast_skip`：已同步文件只要 `size + mtime` 与索引记录匹配且 objectKey 非空，即直接跳过 hash。严格内容扫描可用 `metadata_fast_skip: false` 或 `--strict-hash-scan`。
+- 未被快跳过的候选文件按 `workers` 并发 hash，避免同步任务生成阶段串行读盘。
+- `index` 新增 `ApplySyncResults`，mtime-only 更新和 copier 成功结果都使用批量 bbolt 事务落库，减少事务开销。
+- 小文件强制校验由 `verify_small_files` / `--no-small-verify` 控制，默认仍为 true，兼顾完整性默认值与海量小文件性能调优。
+
+**影响**：默认模式更快，但会信任文件系统元数据；若源文件内容被修改后又人为恢复 size/mtime，默认模式可能跳过该文件。需要防御这类场景时使用严格内容扫描。
