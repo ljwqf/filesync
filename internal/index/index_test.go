@@ -225,3 +225,69 @@ func TestDeleteObject(t *testing.T) {
 		t.Error("object still exists")
 	}
 }
+
+// TestApplyReindexBatch 验证 reindex 批量写入在单事务内原子落盘 file 与 object 记录。
+func TestApplyReindexBatch(t *testing.T) {
+	idx := newTestIndex(t)
+	fileRecs := map[string]FileRecord{
+		"a.txt": {Size: 10, ObjectKey: "h3:aaaa", Mtime: time.Unix(1, 0)},
+		"b.txt": {Size: 20, ObjectKey: "h3:bbbb", Mtime: time.Unix(2, 0)},
+	}
+	objectRecs := map[string]ObjectRecord{
+		"h3:aaaa": {Size: 10, RefCount: 1},
+		"h3:bbbb": {Size: 20, RefCount: 1},
+	}
+	if err := idx.ApplyReindexBatch(fileRecs, objectRecs); err != nil {
+		t.Fatalf("ApplyReindexBatch: %v", err)
+	}
+
+	// file 记录可读
+	got, ok, _ := idx.GetFile("a.txt")
+	if !ok || got.Size != 10 || got.ObjectKey != "h3:aaaa" {
+		t.Errorf("file a.txt = %+v, ok=%v", got, ok)
+	}
+	// object 记录可读且 RefCount 由调用方给定（reindex 不做增减）
+	obj, ok, _ := idx.GetObject("h3:bbbb")
+	if !ok || obj.RefCount != 1 || obj.Size != 20 {
+		t.Errorf("object h3:bbbb = %+v, ok=%v", obj, ok)
+	}
+}
+
+// TestApplyReindexBatch_Empty 验证空 map 为 no-op，不报错。
+func TestApplyReindexBatch_Empty(t *testing.T) {
+	idx := newTestIndex(t)
+	if err := idx.ApplyReindexBatch(nil, nil); err != nil {
+		t.Fatalf("ApplyReindexBatch(nil,nil): %v", err)
+	}
+	// 不应有任何记录
+	var n int
+	idx.IterateFiles(func(rel string, r FileRecord) bool { n++; return true })
+	if n != 0 {
+		t.Errorf("expected 0 files, got %d", n)
+	}
+}
+
+// TestApplyReindexBatch_Overwrites 验证批量写入覆盖既有记录（reindex 重建场景）。
+func TestApplyReindexBatch_Overwrites(t *testing.T) {
+	idx := newTestIndex(t)
+	// 旧记录指向 h3:old
+	idx.PutFile("a.txt", FileRecord{Size: 5, ObjectKey: "h3:old"})
+	idx.PutObject("h3:old", ObjectRecord{RefCount: 1, Size: 5})
+
+	// reindex 重建：a.txt 改指向 h3:new，object 表整体替换
+	if err := idx.ApplyReindexBatch(
+		map[string]FileRecord{"a.txt": {Size: 9, ObjectKey: "h3:new"}},
+		map[string]ObjectRecord{"h3:new": {RefCount: 1, Size: 9}},
+	); err != nil {
+		t.Fatalf("ApplyReindexBatch: %v", err)
+	}
+
+	got, _, _ := idx.GetFile("a.txt")
+	if got.ObjectKey != "h3:new" || got.Size != 9 {
+		t.Errorf("file a.txt not overwritten = %+v", got)
+	}
+	newObj, _, _ := idx.GetObject("h3:new")
+	if newObj.RefCount != 1 || newObj.Size != 9 {
+		t.Errorf("object h3:new = %+v", newObj)
+	}
+}

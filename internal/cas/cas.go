@@ -173,6 +173,14 @@ func (c *fileCAS) RemoveTempObject(objectKey string) error {
 		return fmt.Errorf("invalid objectKey: %w", err)
 	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
+	// 文件已不存在视为成功：exFAT 崩溃恢复重试时前次可能已清理临时 object，
+	// 此时 Chmod 会因 ENOENT 失败，必须在 Chmod 前短路，保证幂等。
+	if _, err := os.Stat(objPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat temp object: %w", err)
+	}
 	// exFAT 临时 object，需先解除只读再删
 	if err := os.Chmod(objPath, 0644); err != nil {
 		return fmt.Errorf("chmod temp object: %w", err)
@@ -188,6 +196,14 @@ func (c *fileCAS) DeleteObject(objectKey string) error {
 		return fmt.Errorf("invalid objectKey: %w", err)
 	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
+	// 文件已不存在视为成功：prune 重跑/崩溃恢复会重复删除同一 object，
+	// 此时 Chmod 会因 ENOENT 失败，必须在 Chmod 前短路，保证容错（与 prune.go 注释契约一致）。
+	if _, err := os.Stat(objPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat object: %w", err)
+	}
 	if err := os.Chmod(objPath, 0644); err != nil {
 		return fmt.Errorf("chmod object: %w", err)
 	}
@@ -241,7 +257,7 @@ func detectMode(path string) StorageMode {
 // 使用带随机后缀的临时目录避免并发调用时互相干扰。
 func DetectMode(path string) StorageMode {
 	// 创建带随机后缀的临时目录，避免并发调用间的竞态
-	testDir, cleanup, ok := makeUniqueTestDir(path)
+	testDir, cleanup, ok := makeUniqueTestDir()
 	if !ok {
 		return ModeCopy // 无法创建，保守用 copy
 	}
@@ -259,7 +275,7 @@ func DetectMode(path string) StorageMode {
 
 // makeUniqueTestDir 在系统临时目录下创建带随机后缀的测试目录，返回目录路径、清理函数与成功标志。
 // 使用系统临时目录避免在目标路径（可能是只读介质）创建文件，同时避免并发调用间的竞态。
-func makeUniqueTestDir(path string) (dir string, cleanup func(), ok bool) {
+func makeUniqueTestDir() (dir string, cleanup func(), ok bool) {
 	var suffix [4]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		// rand 失败时退回使用固定目录（仍可用，只是并发不安全）

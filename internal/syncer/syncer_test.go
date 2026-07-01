@@ -3,6 +3,7 @@ package syncer
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/ljwqf/filesync/internal/cas"
@@ -44,6 +45,37 @@ func TestSyncer_FullSync(t *testing.T) {
 	got, _ := os.ReadFile(filepath.Join(targetRoot, "Project", "a.txt"))
 	if string(got) != "hello" {
 		t.Errorf("a.txt = %q", got)
+	}
+}
+
+// TestSyncer_SetProgress 验证 SetProgress 回调透传给 copier，每个拷贝文件触发一次事件。
+func TestSyncer_SetProgress(t *testing.T) {
+	s, _, srcDir := setupSyncer(t)
+	os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(srcDir, "b.txt"), []byte("world"), 0644)
+
+	var events []copier.ProgressEvent
+	var mu sync.Mutex
+	s.SetProgress(func(e copier.ProgressEvent) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	})
+
+	rep, err := s.Sync()
+	if err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	if rep.Failed != 0 {
+		t.Fatalf("failed = %d: %v", rep.Failed, rep.Errors)
+	}
+	if len(events) != 2 {
+		t.Errorf("progress events = %d, want 2: %+v", len(events), events)
+	}
+	for _, e := range events {
+		if !e.Copied {
+			t.Errorf("event %q should be Copied=true", e.RelPath)
+		}
 	}
 }
 

@@ -30,10 +30,30 @@ jobs:
           GOMODCACHE: ${{ runner.temp }}/gomod
         run: go mod download
 
-      - name: Test (race detector)
+      - name: Test (race detector + coverage)
         env:
           GOMODCACHE: ${{ runner.temp }}/gomod
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Enforce coverage floor (80%, ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          GOMODCACHE: ${{ runner.temp }}/gomod
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          echo "Total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { exit !(t >= 80) }' || {
+            echo "::error::Coverage ${total}% is below the 80% floor"
+            exit 1
+          }
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.out
+          if-no-files-found: ignore
 
       - name: Build
         env:
