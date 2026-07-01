@@ -33,7 +33,9 @@ jobs:
       - name: Test (race detector + coverage)
         env:
           GOMODCACHE: ${{ runner.temp }}/gomod
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        # shell: bash 统一双平台，避免 Windows PowerShell 拆分 -coverprofile=coverage.out
+        shell: bash
+        run: go test -race -count=1 -coverprofile=coverage.out ./internal/...
 
       - name: Enforce coverage floor (80%, ubuntu only)
         if: matrix.os == 'ubuntu-latest'
