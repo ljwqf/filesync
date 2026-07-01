@@ -3,6 +3,7 @@ package lock
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,41 @@ func TestRelease_NilSafe(t *testing.T) {
 	var l *Lock
 	if err := l.Release(); err != nil {
 		t.Errorf("nil Release should return nil, got %v", err)
+	}
+}
+
+// TestAcquire_CorruptLockRejected 验证锁文件格式损坏（PID 无法解析）时保守拒绝，
+// 而非误判为可回收的崩溃残留。覆盖 readLock 解析错误路径。
+func TestAcquire_CorruptLockRejected(t *testing.T) {
+	dir := t.TempDir()
+	// 写入无法解析为 PID 的损坏内容
+	corruptPath := filepath.Join(dir, lockFileName)
+	if err := os.WriteFile(corruptPath, []byte("not-a-pid\ngarbage\n"), 0644); err != nil {
+		t.Fatalf("write corrupt lock: %v", err)
+	}
+
+	_, err := Acquire(dir)
+	if err == nil {
+		t.Fatal("Acquire with corrupt lock should return error")
+	}
+	// 应提示格式损坏而非尝试回收
+	if !strings.Contains(err.Error(), "格式损坏") {
+		t.Errorf("error should mention corrupt format, got: %v", err)
+	}
+	// 损坏文件应原样保留（不自动删除，交由用户判断）
+	if _, err := os.Stat(corruptPath); err != nil {
+		t.Errorf("corrupt lock file should be preserved, got: %v", err)
+	}
+}
+
+// TestReadLock_EmptyFile 验证空锁文件被识别为格式损坏。
+func TestReadLock_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	emptyPath := filepath.Join(dir, lockFileName)
+	os.WriteFile(emptyPath, []byte(""), 0644)
+
+	_, err := Acquire(dir)
+	if err == nil {
+		t.Fatal("Acquire with empty lock file should return error")
 	}
 }

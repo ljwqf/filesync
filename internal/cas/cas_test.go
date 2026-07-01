@@ -164,6 +164,65 @@ func TestDeleteObject(t *testing.T) {
 	}
 }
 
+// TestDeleteObject_MissingTolerant 验证删除已不存在的 object 不报错（容错）。
+// prune.go 注释声称 DeleteObject 对不存在文件返回 nil；prune 重跑/崩溃恢复会重复删除同一 object。
+func TestDeleteObject_MissingTolerant(t *testing.T) {
+	// 直接构造 copy 模式 CAS，绕过本地文件系统检测（NTFS 上 object 是只读 0444，
+	// chmod 分支同样会因 ENOENT 报错，两种模式都受影响）。
+	root := t.TempDir()
+	objectsRoot := filepath.Join(root, ".filesync", "objects")
+	os.MkdirAll(objectsRoot, 0755)
+	c := &fileCAS{targetRoot: root, objectsRoot: objectsRoot, mode: ModeCopy}
+
+	// object 从未创建，删除应容错返回 nil（与 prune.go:33 注释契约一致）
+	if err := c.DeleteObject("h3:aabbccdd"); err != nil {
+		t.Errorf("DeleteObject on missing object should be tolerant, got: %v", err)
+	}
+	// 二次删除同样成功
+	if err := c.DeleteObject("h3:aabbccdd"); err != nil {
+		t.Errorf("second DeleteObject should still be tolerant, got: %v", err)
+	}
+}
+
+// TestRemoveTempObject_InvalidKey 验证非法 objectKey（路径穿越）被拒绝而非删除外部文件。
+func TestRemoveTempObject_InvalidKey(t *testing.T) {
+	c, root := newTestCAS(t)
+	// NTFS 模式下 RemoveTempObject 是 no-op，不触发校验；仅在 copy 模式下校验生效。
+	if c.Mode() != ModeCopy {
+		t.Skip("invalid-key validation only reached in copy mode")
+	}
+	// 诱饵文件，确保不被删除
+	baitFile := filepath.Join(filepath.Dir(root), "bait-temp-do-not-delete")
+	os.WriteFile(baitFile, []byte("bait"), 0644)
+	defer os.Remove(baitFile)
+
+	if err := c.RemoveTempObject("h3:../../" + filepath.Base(baitFile)); err == nil {
+		t.Fatal("RemoveTempObject with traversal key should return error")
+	}
+	if _, err := os.Stat(baitFile); err != nil {
+		t.Errorf("bait file should not be deleted: %v", err)
+	}
+}
+
+// TestRemoveTempObject_MissingIdempotent 验证删除已不存在的临时 object 不报错（幂等）。
+// exFAT 崩溃恢复重试场景：前次运行已清理临时 object，重试删除应成功而非卡在 chmod。
+func TestRemoveTempObject_MissingIdempotent(t *testing.T) {
+	// 直接构造 copy 模式 CAS，绕过本地文件系统检测（NTFS 也能跑 copy 分支）。
+	root := t.TempDir()
+	objectsRoot := filepath.Join(root, ".filesync", "objects")
+	os.MkdirAll(objectsRoot, 0755)
+	c := &fileCAS{targetRoot: root, objectsRoot: objectsRoot, mode: ModeCopy}
+
+	// object 从未创建，直接删除应幂等成功
+	if err := c.RemoveTempObject("h3:aabbccdd"); err != nil {
+		t.Errorf("RemoveTempObject on missing object should be idempotent, got: %v", err)
+	}
+	// 二次删除同样应成功
+	if err := c.RemoveTempObject("h3:aabbccdd"); err != nil {
+		t.Errorf("second RemoveTempObject should still be idempotent, got: %v", err)
+	}
+}
+
 func TestListObjects(t *testing.T) {
 	c, _ := newTestCAS(t)
 	src := filepath.Join(t.TempDir(), "src.txt")
