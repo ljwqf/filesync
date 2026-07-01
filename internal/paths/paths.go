@@ -27,13 +27,11 @@ func Sanitized(p string) string {
 // objectKey 格式 "h3:<hex>"；bucket1 = hex 前2字符，bucket2 = hex 前4字符。
 // 物理文件名用纯 hex（Windows 文件名不允许冒号），objectKey 的 "h3:" 前缀仅用于索引 key。
 // objectsRoot 是 objects 目录的绝对路径。
+// 非法 objectKey（含非 hex 字符如 ../）返回空字符串，调用方应检查。
 func ObjectPath(objectsRoot, objectKey string) string {
 	hex := strings.TrimPrefix(objectKey, "h3:")
-	if len(hex) < 4 {
-		// 不足4字符时用完整 hex 补齐
-		for len(hex) < 4 {
-			hex += "0"
-		}
+	if !isValidHex(hex) || len(hex) < 4 {
+		return ""
 	}
 	bucket1 := hex[:2]
 	bucket2 := hex[:4]
@@ -41,12 +39,24 @@ func ObjectPath(objectsRoot, objectKey string) string {
 }
 
 // ObjectBuckets 从 objectKey 提取两层分桶目录名。
+// 非法 objectKey 返回空字符串。
 func ObjectBuckets(objectKey string) (bucket1, bucket2 string) {
 	hex := strings.TrimPrefix(objectKey, "h3:")
-	if len(hex) < 4 {
-		for len(hex) < 4 {
-			hex += "0"
-		}
+	if !isValidHex(hex) || len(hex) < 4 {
+		return "", ""
 	}
 	return hex[:2], hex[:4]
+}
+
+// isValidHex 判断字符串是否为纯十六进制（防路径穿越：../ 等非 hex 字符被拒绝）。
+func isValidHex(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

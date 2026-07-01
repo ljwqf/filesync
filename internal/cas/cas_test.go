@@ -202,3 +202,44 @@ func TestDetectMode(t *testing.T) {
 	}
 	_ = runtime.GOOS
 }
+
+// TestObjectPath_RejectsTraversal 验证恶意 objectKey（含 ../）不会生成逃逸路径。
+// 这是 P1 安全修复的核心测试：防止篡改索引后通过 prune/DeleteObject 删除任意文件。
+func TestObjectPath_RejectsTraversal(t *testing.T) {
+	c, _ := newTestCAS(t)
+	maliciousKeys := []string{
+		"h3:../../etc/passwd",
+		"h3:..",
+		"h3:../..",
+		"h3:..%2f..%2f",
+		"h3:gg/../hh", // 含非 hex 字符
+		"h3:ab/cd",   // 含路径分隔符
+		"badprefix:aabbccdd",
+		"h3:abc", // 不足 4 字符
+	}
+	for _, key := range maliciousKeys {
+		got := c.ObjectPath(key)
+		if got != "" {
+			t.Errorf("ObjectPath(%q) = %q, want empty (rejected)", key, got)
+		}
+	}
+}
+
+// TestDeleteObject_RejectsTraversal 验证 DeleteObject 对恶意 key 返回错误而非删除外部文件。
+func TestDeleteObject_RejectsTraversal(t *testing.T) {
+	c, root := newTestCAS(t)
+	// 在 objectsRoot 之上创建一个诱饵文件，确保它不被删除
+	baitDir := filepath.Dir(filepath.Dir(root))
+	baitFile := filepath.Join(baitDir, "bait-do-not-delete")
+	os.WriteFile(baitFile, []byte("bait"), 0644)
+	defer os.Remove(baitFile)
+
+	err := c.DeleteObject("h3:../../" + filepath.Base(baitFile))
+	if err == nil {
+		t.Fatal("DeleteObject with traversal key should return error")
+	}
+	// 诱饵文件应仍存在
+	if _, err := os.Stat(baitFile); err != nil {
+		t.Errorf("bait file should not be deleted: %v", err)
+	}
+}

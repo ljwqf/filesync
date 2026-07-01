@@ -66,3 +66,53 @@ func TestVerify_DetectMismatch(t *testing.T) {
 		t.Errorf("failed = %d, want 1", stats.Failed)
 	}
 }
+
+// TestVerify_RejectsTraversalRelPath 验证含 ../ 的恶意 relPath 不会读取 targetRoot 外的文件。
+// 索引被篡改写入 "../../<external>" 后，verify 应报 failed 而非读取外部文件。
+func TestVerify_RejectsTraversalRelPath(t *testing.T) {
+	targetRoot := t.TempDir()
+	objectsRoot := filepath.Join(targetRoot, ".filesync", "objects")
+	os.MkdirAll(objectsRoot, 0755)
+	c, _ := cas.New(targetRoot, objectsRoot)
+	idx, _ := index.Open(filepath.Join(targetRoot, ".filesync", "index.db"))
+	defer idx.Close()
+	h := hasher.New()
+
+	// 在 targetRoot 之外创建一个文件
+	externalDir := t.TempDir()
+	externalFile := filepath.Join(externalDir, "secret.txt")
+	os.WriteFile(externalFile, []byte("secret"), 0644)
+
+	// 构造逃逸 relPath：从 targetRoot 出发 ../../到达 externalDir
+	relPath, err := filepath.Rel(targetRoot, externalFile)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	// relPath 应含 .. 表示逃逸
+	idx.PutFile(filepath.ToSlash(relPath), index.FileRecord{Size: 6, ObjectKey: "h3:whatever"})
+
+	v := New(c, idx, h, targetRoot)
+	stats, err := v.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// 应报 failed（path escapes target root），而非读取外部文件
+	if stats.Failed != 1 {
+		t.Errorf("failed = %d, want 1 (path escape should be rejected)", stats.Failed)
+	}
+	if len(stats.Errors) != 1 {
+		t.Fatalf("errors = %d, want 1: %+v", len(stats.Errors), stats.Errors)
+	}
+	if !contains(stats.Errors[0], "escapes target root") {
+		t.Errorf("error should mention path escape: %s", stats.Errors[0])
+	}
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

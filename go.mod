@@ -1,6 +1,9 @@
 module github.com/ljwqf/filesync
 
-go 1.23.0
+// go 1.23.10 fixes GO-2025-3750 (Windows O_CREATE|O_EXCL inconsistency).
+// GO-2026-4602 (FileInfo escape from os.Root) requires go1.25.8 to fully fix,
+// but this codebase does not use os.Root/os.OpenRoot, so it is not exploitable here.
+go 1.23.10
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.6.1

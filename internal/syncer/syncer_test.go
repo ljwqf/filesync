@@ -186,16 +186,16 @@ func TestEstimateSpaceNeeded_NTFS(t *testing.T) {
 	if c.Mode() != cas.ModeHardlink {
 		t.Skip("NTFS space estimation test requires hardlink mode")
 	}
-	// 预创建一个已存在的 object（h3:existing）
+	// 预创建一个已存在的 object（使用合法 hex key）
 	src := filepath.Join(t.TempDir(), "s")
 	os.WriteFile(src, []byte("existing"), 0644)
-	c.EnsureObject(src, "h3:existing")
+	c.EnsureObject(src, "h3:eeefffff")
 
 	tasks := []copier.Task{
-		{ObjectKey: "h3:existing", Size: 100}, // 已存在，不计
-		{ObjectKey: "h3:new1", Size: 200},     // 新增，计 200
-		{ObjectKey: "h3:new1", Size: 200},     // 同 key 已计，不重复
-		{ObjectKey: "h3:new2", Size: 300},     // 新增，计 300
+		{ObjectKey: "h3:eeefffff", Size: 100}, // 已存在，不计
+		{ObjectKey: "h3:aabbcc11", Size: 200}, // 新增，计 200
+		{ObjectKey: "h3:aabbcc11", Size: 200}, // 同 key 已计，不重复
+		{ObjectKey: "h3:bbccddee", Size: 300}, // 新增，计 300
 	}
 	got := estimateSpaceNeeded(c, tasks, 8)
 	if got != 500 {
@@ -213,9 +213,9 @@ func TestEstimateSpaceNeeded_NewObjectKey(t *testing.T) {
 	c, _ := cas.New(root, objectsRoot)
 
 	tasks := []copier.Task{
-		{ObjectKey: "h3:a", Size: 50},
-		{ObjectKey: "h3:b", Size: 500},
-		{ObjectKey: "h3:c", Size: 200},
+		{ObjectKey: "h3:aaaa1111", Size: 50},
+		{ObjectKey: "h3:bbbb2222", Size: 500},
+		{ObjectKey: "h3:cccc3333", Size: 200},
 	}
 	got := estimateSpaceNeeded(c, tasks, 8)
 	if c.Mode() == cas.ModeHardlink {

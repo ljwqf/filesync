@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ljwqf/filesync/internal/hasher"
 	"github.com/ljwqf/filesync/internal/paths"
 )
 
@@ -64,7 +65,29 @@ func New(targetRoot, objectsRoot string) (CAS, error) {
 
 func (c *fileCAS) Mode() StorageMode { return c.mode }
 
+// validateObjectKey 校验 objectKey 格式合法，防止路径穿越攻击。
+// 合法 objectKey 格式为 "h3:" + 纯十六进制字符串（xxh3 128位哈希 = 32 hex 字符）。
+// 拒绝非十六进制字符（如 ../）可防止 filepath.Join 解析 .. 导致路径逃逸出 objectsRoot。
+func validateObjectKey(objectKey string) error {
+	hexPart := strings.TrimPrefix(objectKey, hasher.KeyPrefix)
+	if hexPart == objectKey {
+		return fmt.Errorf("objectKey missing %q prefix: %q", hasher.KeyPrefix, objectKey)
+	}
+	if len(hexPart) < 4 {
+		return fmt.Errorf("objectKey hex too short (need >=4): %q", objectKey)
+	}
+	if !isHex(hexPart) {
+		return fmt.Errorf("objectKey contains non-hex characters: %q", objectKey)
+	}
+	return nil
+}
+
 func (c *fileCAS) ObjectPath(objectKey string) string {
+	if err := validateObjectKey(objectKey); err != nil {
+		// 合法 objectKey 总是纯 hex（由 hasher.HashFile 生成）。
+		// 到达此处说明索引被篡改或存在 bug，返回空路径使调用方报错而非穿越。
+		return ""
+	}
 	hex := strings.TrimPrefix(objectKey, "h3:")
 	if len(hex) < 4 {
 		for len(hex) < 4 {
@@ -77,6 +100,9 @@ func (c *fileCAS) ObjectPath(objectKey string) string {
 }
 
 func (c *fileCAS) EnsureObject(srcAbsPath, objectKey string) (bool, error) {
+	if err := validateObjectKey(objectKey); err != nil {
+		return false, fmt.Errorf("invalid objectKey: %w", err)
+	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
 	if _, err := os.Stat(objPath); err == nil {
 		return true, nil // 已存在，复用
@@ -100,6 +126,9 @@ func (c *fileCAS) EnsureObject(srcAbsPath, objectKey string) (bool, error) {
 }
 
 func (c *fileCAS) PlaceFileHardlink(objectKey, destAbsPath string) error {
+	if err := validateObjectKey(objectKey); err != nil {
+		return fmt.Errorf("invalid objectKey: %w", err)
+	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
 	destLong := paths.Long(destAbsPath)
 	// 覆盖预处理：dest 只读则先 chmod 可写
@@ -121,6 +150,9 @@ func (c *fileCAS) PlaceFileHardlink(objectKey, destAbsPath string) error {
 }
 
 func (c *fileCAS) PlaceFileCopy(objectKey, destAbsPath string) error {
+	if err := validateObjectKey(objectKey); err != nil {
+		return fmt.Errorf("invalid objectKey: %w", err)
+	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
 	destLong := paths.Long(destAbsPath)
 	prepareOverwrite(destLong)
@@ -137,6 +169,9 @@ func (c *fileCAS) RemoveTempObject(objectKey string) error {
 	if c.mode == ModeHardlink {
 		return nil // NTFS no-op
 	}
+	if err := validateObjectKey(objectKey); err != nil {
+		return fmt.Errorf("invalid objectKey: %w", err)
+	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
 	// exFAT 临时 object，需先解除只读再删
 	if err := os.Chmod(objPath, 0644); err != nil {
@@ -149,6 +184,9 @@ func (c *fileCAS) RemoveTempObject(objectKey string) error {
 }
 
 func (c *fileCAS) DeleteObject(objectKey string) error {
+	if err := validateObjectKey(objectKey); err != nil {
+		return fmt.Errorf("invalid objectKey: %w", err)
+	}
 	objPath := paths.Long(c.ObjectPath(objectKey))
 	if err := os.Chmod(objPath, 0644); err != nil {
 		return fmt.Errorf("chmod object: %w", err)
