@@ -242,16 +242,20 @@ E:\PSSD_sync\
 ## 测试
 
 ```bash
-go test ./...            # 全部测试
-go test -race ./...      # 含竞态检测
-go test -cover ./...     # 覆盖率
+go test ./internal/...            # 全部测试(业务包,不含 main)
+go test -race ./internal/...      # 含竞态检测
+go test -cover ./internal/...     # 覆盖率
 ```
 
-当前共 **136 个测试**,覆盖 18 个包,`go vet ./...` 无问题。
+当前共 **168 个测试**,覆盖 18 个内部包,整体覆盖率 **~81.8%**。
+
+> **覆盖率口径**:用 `./internal/...` 而非 `./...`。`main.go` 是 CLI 入口胶水(命令分发、flag 解析),无单元测试,计入会拉低到 ~70%,不反映业务代码真实覆盖。`main.go` 编译由 CI 的 build 步保证。
+>
+> **`go vet`**:`go vet ./internal/...` 在各平台对本平台文件无问题。`go vet ./...` 在 Linux 上会因解析 `_windows.go` 的 import 链报错(Go 工具链跨平台解析限制),CI 不跑全量 vet。
 
 ### CI/CD
 
-每次 push / PR 自动在 **Ubuntu + Windows** 上跑 `go test -race` + `go build`。
+每次 push / PR 自动在 **Ubuntu + Windows** 上跑 `go test -race` + 覆盖率统计 + `go build`。Ubuntu 上额外执行 **80% 覆盖率门槛**(Windows 因 NTFS-only 分支跑不到 copy 模式,数字偏低,不作门槛)。各平台覆盖率产物上传为 artifact,可下载合并查看真实跨平台覆盖。
 
 打 `v*` 标签自动触发 Release，交叉编译 4 个平台并附带 SHA256 checksums：
 
@@ -265,6 +269,13 @@ go test -cover ./...     # 覆盖率
 ---
 
 ## 更新记录(CHANGELOG)
+
+### 2026-07-02 测试覆盖提升 + CAS 幂等修复 + CI 覆盖率门槛
+
+- **CAS 幂等修复**:`RemoveTempObject` 与 `DeleteObject` 删除已不存在的 object 时,`Chmod` 先因 `ENOENT` 报错中断,导致 exFAT 崩溃恢复重试失败(prune 重跑会重复删除同一 object)。Chmod 前加 `os.Stat` 短路,不存在直接返回 nil。`DeleteObject` 此前与 `prune.go` 注释"对不存在文件返回 nil"的契约不符,一并修正。
+- **覆盖率提升**:整体覆盖率 79.8% → 81.8%。补薄弱路径:`paths.MtimeClose`/`ObjectBuckets`(0%→100%)、`index.ApplyReindexBatch`(0%→75%)、`syncer.SetProgress`(0%→100%)、`lock` 损坏锁文件拒绝路径。幂等修复配套复现测试直接构造 `fileCAS{mode: ModeCopy}` 绕过本地 NTFS 检测,CI Linux 真实 exFAT 路径再验。
+- **CI 覆盖率门槛**:`ci.yml` 测试步加 `-coverprofile`,新增 80% 覆盖率门槛(仅 ubuntu)与 coverage artifact 上传。Test 步显式 `shell: bash`,修复 Windows PowerShell 拆分 `-coverprofile=coverage.out` 的问题。
+- **清理**:`makeUniqueTestDir` 移除未使用的 `path` 参数(`go vet` unusedparams)。
 
 ### 2026-07-01 小文件同步性能优化
 
