@@ -380,4 +380,4 @@ go test -cover ./internal/...     # 覆盖率
 - **CI/CD**：`.github/workflows/` 下 CI（Ubuntu + Windows 矩阵）+ Release（4 平台交叉编译）
 - **测试跨平台**：config/copier/paths 测试加 `runtime.GOOS` 平台判断
 - **YAML 转义修复**：`yaml.v3` 双引号内 `\P` 被解释为 U+2029，含反斜杠路径改用单引号包裹
-- **sanitize 行为**：Unix 只 strip `/` 和 ` `，反斜杠和 `..` 为合法 Unix 文件名字符
+- **sanitize 行为**：Unix 只 strip `/` 和 `\0`，反斜杠和 `..` 为合法 Unix 文件名字符

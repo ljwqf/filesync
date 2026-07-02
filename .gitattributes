@@ -1,0 +1,2 @@
+# Markdown 文档统一 LF 行尾，避免 CRLF 触发 GitHub 二进制检测导致不渲染
+*.md text eol=lf
